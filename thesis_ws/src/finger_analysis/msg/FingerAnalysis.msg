@@ -1,0 +1,9 @@
+Header header
+geometry_msgs/Point knuckle_2d
+geometry_msgs/Point tip_2d
+geometry_msgs/Point knuckle_3d
+geometry_msgs/Point tip_3d
+geometry_msgs/Vector3 direction_3d
+float32 straightness_score
+bool is_straight
+float32 confidence

@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package>
+  <name>visualization</name>
+  <version>0.1.0</version>
+  <description>Real-time visualization of hand tracking and pointing target</description>
+  
+  <maintainer email="user@example.com">Your Name</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>hand_detection</build_depend>
+  <build_depend>finger_analysis</build_depend>
+  <build_depend>camera_calibration</build_depend>
+  <build_depend>pointing_localization</build_depend>
+  <run_depend>rospy</run_depend>
+  <run_depend>std_msgs</run_depend>
+  <run_depend>geometry_msgs</run_depend>
+  <run_depend>hand_detection</run_depend>
+  <run_depend>finger_analysis</run_depend>
+  <run_depend>camera_calibration</run_depend>
+  <run_depend>pointing_localization</run_depend>
+
+</package>

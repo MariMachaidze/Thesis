@@ -1,0 +1,10 @@
+Header header
+geometry_msgs/Vector3 plane_normal
+geometry_msgs/Point plane_center
+geometry_msgs/Vector3 paper_x_axis
+geometry_msgs/Vector3 paper_y_axis
+float32 paper_width_mm
+float32 paper_height_mm
+float32 tilt_angle_rad
+float32 distance_to_paper_m
+bool is_calibrated

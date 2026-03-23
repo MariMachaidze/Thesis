@@ -1,0 +1,32 @@
+# Catkin build artifacts
+thesis_ws/build/
+thesis_ws/devel/
+
+# Python virtual environment
+thesis_env/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+
+# md files
+CHECKLIST_AND_NEXT_STEPS.md
+INDEX_AND_GUIDE.md
+PACKAGE_STRUCTURE.md
+QUICK_START.md
+REFACTORING_SUMMARY.md
+
+measure_tilt_imu.py
+measure_tilt.py

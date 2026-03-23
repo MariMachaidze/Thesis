@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  
+  <!-- D435i Camera Driver -->
+  <node pkg="d435i_camera" type="d435i_driver_node.py" name="d435i_driver" output="screen">
+    <param name="width" value="1280"/>
+    <param name="height" value="720"/>
+    <param name="fps" value="30"/>
+  </node>
+  
+  <!-- Camera Calibration (manual) -->
+  <node pkg="camera_calibration" type="camera_calibration_node.py" name="camera_calibration" output="screen">
+    <param name="paper_width_mm" value="594.0"/>
+    <param name="paper_height_mm" value="841.0"/>
+    <param name="fx" value="640.0"/>
+    <param name="fy" value="640.0"/>
+    <param name="cx" value="640.0"/>
+    <param name="cy" value="360.0"/>
+  </node>
+  
+  <!-- Hand Detection -->
+  <node pkg="hand_detection" type="hand_detection_node.py" name="hand_detection" output="screen">
+    <param name="detection_confidence" value="0.7"/>
+    <param name="tracking_confidence" value="0.5"/>
+  </node>
+  
+  <!-- Finger Analysis -->
+  <node pkg="finger_analysis" type="finger_analysis_node.py" name="finger_analysis" output="screen">
+    <param name="straightness_threshold" value="0.7"/>
+    <param name="fx" value="640.0"/>
+    <param name="fy" value="640.0"/>
+    <param name="cx" value="640.0"/>
+    <param name="cy" value="360.0"/>
+    <!-- Landmark smoothing: "one_euro" or "ema" -->
+    <param name="filter_type" value="one_euro"/>
+    <param name="filter_min_cutoff" value="1.0"/>
+    <param name="filter_beta" value="0.007"/>
+    <param name="filter_d_cutoff" value="1.0"/>
+    <param name="ema_alpha" value="0.1"/>
+  </node>
+  
+  <!-- Pointing Localization -->
+  <node pkg="pointing_localization" type="pointing_localization_node.py" name="pointing_localization" output="screen">
+    <param name="filter_min_cutoff" value="1.0"/>
+    <param name="filter_beta" value="0.007"/>
+    <param name="filter_d_cutoff" value="1.0"/>
+  </node>
+  
+  <!-- Visualization -->
+  <node pkg="visualization" type="visualization_node.py" name="visualization" output="screen">
+    <param name="show_landmarks" value="true"/>
+    <param name="fx" value="640.0"/>
+    <param name="fy" value="640.0"/>
+    <param name="cx" value="640.0"/>
+    <param name="cy" value="360.0"/>
+  </node>
+
+</launch>
