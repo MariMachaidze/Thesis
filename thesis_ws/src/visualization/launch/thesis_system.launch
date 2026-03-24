@@ -31,12 +31,10 @@
     <param name="fy" value="640.0"/>
     <param name="cx" value="640.0"/>
     <param name="cy" value="360.0"/>
-    <!-- Landmark smoothing: "one_euro" or "ema" -->
-    <param name="filter_type" value="one_euro"/>
+    <!-- One Euro Filter for landmark smoothing -->
     <param name="filter_min_cutoff" value="1.0"/>
     <param name="filter_beta" value="0.007"/>
     <param name="filter_d_cutoff" value="1.0"/>
-    <param name="ema_alpha" value="0.1"/>
   </node>
   
   <!-- Pointing Localization -->

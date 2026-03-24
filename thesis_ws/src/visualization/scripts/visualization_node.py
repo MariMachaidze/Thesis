@@ -150,8 +150,8 @@ class VisualizationNode:
         cv2.circle(frame, (x1, y1), 8, (255, 0, 0), -1)
         cv2.circle(frame, (x2, y2), 8, (0, 255, 255), -1)
 
-        # Draw 3D ray to paper plane if calibrated
-        if calib_msg and calib_msg.is_calibrated:
+        # Draw 3D ray to paper plane only if finger is straight and calibrated
+        if finger_msg.is_straight and calib_msg and calib_msg.is_calibrated:
             knuckle_3d = np.array([finger_msg.knuckle_3d.x,
                                    finger_msg.knuckle_3d.y,
                                    finger_msg.knuckle_3d.z])

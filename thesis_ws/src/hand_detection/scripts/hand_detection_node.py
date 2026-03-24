@@ -18,8 +18,8 @@ class HandDetectionNode:
     def __init__(self):
         rospy.init_node('hand_detection_node', anonymous=False)
 
-        detection_confidence = rospy.get_param('~detection_confidence', 0.7)
-        tracking_confidence = rospy.get_param('~tracking_confidence', 0.5)
+        detection_confidence = rospy.get_param('~detection_confidence', 0.65)
+        tracking_confidence = rospy.get_param('~tracking_confidence', 0.45)
 
         self.bridge = CvBridge()
 

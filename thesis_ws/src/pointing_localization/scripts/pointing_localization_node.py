@@ -23,7 +23,7 @@ class OneEuroFilter:
         beta: speed coefficient (higher = less lag when moving fast)
         d_cutoff: cutoff frequency for derivative estimation
     """
-    def __init__(self, min_cutoff=1.0, beta=0.007, d_cutoff=1.0):
+    def __init__(self, min_cutoff=0.3, beta=0.007, d_cutoff=1.0):
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.d_cutoff = d_cutoff
@@ -219,8 +219,6 @@ class PointingLocalizationNode:
                     target_msg.is_valid = True
                 else:
                     target_msg.is_valid = False
-                    self.filter_u.reset()
-                    self.filter_v.reset()
                     rospy.logdebug(f"Pointing target outside paper: ({x_norm:.2f}, {y_norm:.2f})")
             else:
                 target_msg.is_valid = False

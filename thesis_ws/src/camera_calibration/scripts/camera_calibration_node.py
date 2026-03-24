@@ -26,8 +26,8 @@ class CameraCalibrationNode:
         self.calib_pub = rospy.Publisher('/camera/calibration', CalibrationData, queue_size=1, latch=True)
         
         # Parameters
-        self.paper_width_mm = rospy.get_param('~paper_width_mm', 297.0)  # A4 landscape
-        self.paper_height_mm = rospy.get_param('~paper_height_mm', 210.0)
+        self.paper_width_mm = rospy.get_param('~paper_width_mm', 594.0)  # A4 landscape
+        self.paper_height_mm = rospy.get_param('~paper_height_mm', 841.0)
         
         # Camera intrinsics
         self.fx = rospy.get_param('~fx', 640.0)

@@ -22,7 +22,7 @@ class OneEuroFilter:
     Smooth when slow, responsive when fast.
     cutoff_freq = min_cutoff + beta * |velocity|
     """
-    def __init__(self, min_cutoff=1.0, beta=0.007, d_cutoff=1.0):
+    def __init__(self, min_cutoff=0.3, beta=0.007, d_cutoff=1.0):
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.d_cutoff = d_cutoff
@@ -64,26 +64,9 @@ class OneEuroFilter:
         self.t_prev = None
 
 
-class EMAFilter:
-    """Exponential moving average filter."""
-    def __init__(self, alpha=0.1):
-        self.alpha = alpha
-        self.x_prev = None
-
-    def __call__(self, x, t=None):
-        if self.x_prev is None:
-            self.x_prev = x
-            return x
-        x_hat = self.alpha * x + (1 - self.alpha) * self.x_prev
-        self.x_prev = x_hat
-        return x_hat
-
-    def reset(self):
-        self.x_prev = None
-
-
 class FingerAnalysisNode:
-    NUM_LANDMARKS = 21
+    # Index finger landmarks: MCP(5), PIP(6), DIP(7), TIP(8)
+    FINGER_INDICES = [5, 6, 7, 8]
 
     def __init__(self):
         rospy.init_node('finger_analysis_node', anonymous=False)
@@ -95,8 +78,14 @@ class FingerAnalysisNode:
         # Publisher
         self.finger_pub = rospy.Publisher('/finger/analysis', FingerAnalysis, queue_size=1)
 
-        # Parameters
-        self.straightness_threshold = rospy.get_param('~straightness_threshold', 0.7)
+        # Straightness hysteresis thresholds
+        self.straight_on_threshold = rospy.get_param('~straight_on_threshold', 0.75)
+        self.straight_off_threshold = rospy.get_param('~straight_off_threshold', 0.55)
+        self.is_straight_state = False
+
+        # EMA smoothing for straightness score before hysteresis
+        self.straightness_ema_alpha = rospy.get_param('~straightness_ema_alpha', 0.3)
+        self.straightness_ema = None
 
         # Camera intrinsics
         self.fx = rospy.get_param('~fx', 901.473)
@@ -105,42 +94,32 @@ class FingerAnalysisNode:
         self.cy = rospy.get_param('~cy', 349.990)
         self.depth_scale = 0.001
 
-        # Landmark smoothing filter
-        self.filter_type = rospy.get_param('~filter_type', 'one_euro')  # "one_euro" or "ema"
-        self.filter_min_cutoff = rospy.get_param('~filter_min_cutoff', 1.0)
-        self.filter_beta = rospy.get_param('~filter_beta', 0.007)
-        self.filter_d_cutoff = rospy.get_param('~filter_d_cutoff', 1.0)
-        self.ema_alpha = rospy.get_param('~ema_alpha', 0.1)
-        self._init_filters()
+        # Depth patch sizes for median filtering
+        self.depth_patch_size = rospy.get_param('~depth_patch_size', 5)
+        self.tip_patch_size = rospy.get_param('~tip_patch_size', 9)
+
+        # One Euro Filters — separate sets for knuckle origin and direction
+        min_cutoff = rospy.get_param('~filter_min_cutoff', 1.0)
+        beta = rospy.get_param('~filter_beta', 0.007)
+        d_cutoff = rospy.get_param('~filter_d_cutoff', 1.0)
+
+        # Filter knuckle 3D position (ray origin) — 3 axes
+        self.knuckle_filters = (
+            OneEuroFilter(min_cutoff, beta, d_cutoff),
+            OneEuroFilter(min_cutoff, beta, d_cutoff),
+            OneEuroFilter(min_cutoff, beta, d_cutoff),
+        )
+        # Filter direction vector (knuckle→tip) — 3 axes
+        self.direction_filters = (
+            OneEuroFilter(min_cutoff, beta, d_cutoff),
+            OneEuroFilter(min_cutoff, beta, d_cutoff),
+            OneEuroFilter(min_cutoff, beta, d_cutoff),
+        )
 
         self.bridge = CvBridge()
         self.depth_image = None
 
-        rospy.loginfo(f"Finger Analysis Node: Ready (filter={self.filter_type})")
-    
-    def _init_filters(self):
-        """Create per-landmark, per-axis smoothing filters."""
-        self.filters_x = []
-        self.filters_y = []
-        for _ in range(self.NUM_LANDMARKS):
-            if self.filter_type == 'one_euro':
-                self.filters_x.append(OneEuroFilter(self.filter_min_cutoff, self.filter_beta, self.filter_d_cutoff))
-                self.filters_y.append(OneEuroFilter(self.filter_min_cutoff, self.filter_beta, self.filter_d_cutoff))
-            else:
-                self.filters_x.append(EMAFilter(self.ema_alpha))
-                self.filters_y.append(EMAFilter(self.ema_alpha))
-
-    def _filter_landmarks(self, keypoints, stamp_sec):
-        """Return a list of (x, y) tuples with smoothed normalized coords."""
-        filtered = []
-        for i, pt in enumerate(keypoints):
-            if i < self.NUM_LANDMARKS:
-                fx = self.filters_x[i](pt.x, stamp_sec)
-                fy = self.filters_y[i](pt.y, stamp_sec)
-            else:
-                fx, fy = pt.x, pt.y
-            filtered.append((fx, fy))
-        return filtered
+        rospy.loginfo("Finger Analysis Node: Ready (depth patch median + 3D One Euro Filter)")
 
     def depth_callback(self, msg):
         """Store depth frame"""
@@ -148,40 +127,78 @@ class FingerAnalysisNode:
             self.depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono16')
         except Exception as e:
             rospy.logerr(f"Depth error: {e}")
-    
-    def get_3d_point(self, x, y):
-        """Convert pixel to 3D"""
+
+    def get_3d_point(self, x, y, landmark_idx=None):
+        """Convert pixel to 3D using median depth patch for noise reduction.
+        Uses larger patch for fingertip (landmark 8) which is thin."""
         if self.depth_image is None:
             return None
-        
+
         h, w = self.depth_image.shape[:2]
         x = int(np.clip(x, 0, w-1))
         y = int(np.clip(y, 0, h-1))
-        
-        depth_value = self.depth_image[y, x]
+
+        # Larger patch for thin fingertip
+        patch_size = self.tip_patch_size if landmark_idx == 8 else self.depth_patch_size
+        half = patch_size // 2
+        y_min = max(0, y - half)
+        y_max = min(h, y + half + 1)
+        x_min = max(0, x - half)
+        x_max = min(w, x + half + 1)
+
+        patch = self.depth_image[y_min:y_max, x_min:x_max]
+        valid = patch[patch > 0]
+        if len(valid) == 0:
+            return None
+
+        depth_value = int(np.median(valid))
         if depth_value == 0 or depth_value > 10000:
             return None
-        
+
         z = depth_value * self.depth_scale
         X = (x - self.cx) * z / self.fx
         Y = (y - self.cy) * z / self.fy
-        
+
         return np.array([X, Y, z])
-    
-    def calculate_straightness(self, landmarks_3d):
-        """Calculate straightness"""
-        if len(landmarks_3d) < 9:
-            return 0.0
-        
-        p5, p6, p7, p8 = landmarks_3d[5], landmarks_3d[6], landmarks_3d[7], landmarks_3d[8]
-        
+
+    def fit_finger_direction(self, points_3d):
+        """Fit a line through finger joints using SVD for robust direction.
+        Uses all joints with valid depth so one bad point (e.g. thin tip)
+        doesn't dominate the direction estimate."""
+        valid = [p for p in points_3d if p is not None]
+        if len(valid) < 2:
+            return None
+
+        pts = np.array(valid)
+        centroid = pts.mean(axis=0)
+        centered = pts - centroid
+
+        # SVD — first right singular vector = best-fit line direction
+        _, _, Vt = np.linalg.svd(centered)
+        direction = Vt[0]
+
+        # Ensure direction points from knuckle toward tip
+        if points_3d[0] is not None and points_3d[-1] is not None:
+            rough_dir = points_3d[-1] - points_3d[0]
+        else:
+            rough_dir = valid[-1] - valid[0]
+        if np.dot(direction, rough_dir) < 0:
+            direction = -direction
+
+        norm = np.linalg.norm(direction)
+        if norm < 1e-6:
+            return None
+        return direction / norm
+
+    def calculate_straightness(self, p5, p6, p7, p8):
+        """Calculate straightness from the 4 index finger joints directly."""
         if any(p is None for p in [p5, p6, p7, p8]):
             return 0.0
-        
+
         vec1 = p6 - p5
         vec2 = p7 - p6
         vec3 = p8 - p7
-        
+
         dots = []
         for v1, v2 in [(vec1, vec2), (vec2, vec3)]:
             n1 = np.linalg.norm(v1)
@@ -195,55 +212,98 @@ class FingerAnalysisNode:
 
         # 1.0 = perfectly straight, 0.0 = bent 90 degrees, -1.0 = fully folded
         return float(np.mean(dots))
-    
+
     def hand_callback(self, msg):
-        """Process hand with filtered landmark coordinates"""
+        """Process hand — back-project to 3D, filter origin and direction separately"""
         if not msg.detected or self.depth_image is None:
+            return
+        if len(msg.keypoints_2d) < 9:
             return
 
         h, w = self.depth_image.shape[:2]
         stamp_sec = msg.header.stamp.to_sec()
 
-        # Smooth normalized landmark coordinates before 3D back-projection
-        filtered = self._filter_landmarks(msg.keypoints_2d, stamp_sec)
-
-        landmarks_3d = [self.get_3d_point(int(fx * w), int(fy * h))
-                        for fx, fy in filtered]
+        # Back-project raw 2D landmarks to 3D (with depth patch median)
+        raw_3d = {}
+        finger_2d = {}
+        for idx in self.FINGER_INDICES:
+            pt = msg.keypoints_2d[idx]
+            px = int(pt.x * w)
+            py = int(pt.y * h)
+            finger_2d[idx] = (pt.x, pt.y)
+            raw_3d[idx] = self.get_3d_point(px, py, landmark_idx=idx)
 
         finger_msg = FingerAnalysis()
         finger_msg.header.stamp = msg.header.stamp
         finger_msg.header.frame_id = msg.header.frame_id
 
-        # Publish the *filtered* 2D coords so downstream sees smoothed values
+        # 2D coords (raw)
         knuckle_2d = Point()
-        knuckle_2d.x, knuckle_2d.y = filtered[5]
+        knuckle_2d.x, knuckle_2d.y = finger_2d[5]
         finger_msg.knuckle_2d = knuckle_2d
 
         tip_2d = Point()
-        tip_2d.x, tip_2d.y = filtered[8]
+        tip_2d.x, tip_2d.y = finger_2d[8]
         finger_msg.tip_2d = tip_2d
 
-        if landmarks_3d[5] is not None:
-            p = landmarks_3d[5]
-            finger_msg.knuckle_3d.x, finger_msg.knuckle_3d.y, finger_msg.knuckle_3d.z = p
+        # Filter knuckle 3D position (ray origin)
+        if raw_3d[5] is not None:
+            kf = self.knuckle_filters
+            knuckle_filt = np.array([
+                kf[0](raw_3d[5][0], stamp_sec),
+                kf[1](raw_3d[5][1], stamp_sec),
+                kf[2](raw_3d[5][2], stamp_sec),
+            ])
+            finger_msg.knuckle_3d.x = knuckle_filt[0]
+            finger_msg.knuckle_3d.y = knuckle_filt[1]
+            finger_msg.knuckle_3d.z = knuckle_filt[2]
 
-        if landmarks_3d[8] is not None:
-            p = landmarks_3d[8]
-            finger_msg.tip_3d.x, finger_msg.tip_3d.y, finger_msg.tip_3d.z = p
+        if raw_3d[8] is not None:
+            finger_msg.tip_3d.x = raw_3d[8][0]
+            finger_msg.tip_3d.y = raw_3d[8][1]
+            finger_msg.tip_3d.z = raw_3d[8][2]
 
-        if landmarks_3d[5] is not None and landmarks_3d[8] is not None:
-            direction = landmarks_3d[8] - landmarks_3d[5]
-            norm = np.linalg.norm(direction)
-            if norm > 1e-6:
-                direction = direction / norm
-                finger_msg.direction_3d.x = direction[0]
-                finger_msg.direction_3d.y = direction[1]
-                finger_msg.direction_3d.z = direction[2]
+        # Fit direction through all 4 joints (robust to noisy tip depth)
+        direction = self.fit_finger_direction(
+            [raw_3d[5], raw_3d[6], raw_3d[7], raw_3d[8]])
+        if direction is not None:
+            # Filter each component of the unit direction vector
+            df = self.direction_filters
+            filt_dir = np.array([
+                df[0](direction[0], stamp_sec),
+                df[1](direction[1], stamp_sec),
+                df[2](direction[2], stamp_sec),
+            ])
+            # Re-normalize after filtering
+            filt_norm = np.linalg.norm(filt_dir)
+            if filt_norm > 1e-6:
+                filt_dir = filt_dir / filt_norm
+            finger_msg.direction_3d.x = filt_dir[0]
+            finger_msg.direction_3d.y = filt_dir[1]
+            finger_msg.direction_3d.z = filt_dir[2]
 
-        straightness = self.calculate_straightness(landmarks_3d)
-        finger_msg.straightness_score = straightness
-        finger_msg.is_straight = straightness > self.straightness_threshold
+        # Straightness: raw score → EMA smoothing → hysteresis
+        raw_straightness = self.calculate_straightness(
+            raw_3d[5], raw_3d[6], raw_3d[7], raw_3d[8])
+        if self.straightness_ema is None:
+            self.straightness_ema = raw_straightness
+        else:
+            a = self.straightness_ema_alpha
+            self.straightness_ema = a * raw_straightness + (1 - a) * self.straightness_ema
+
+        # Hysteresis: activate at on_threshold, deactivate at off_threshold
+        if self.is_straight_state:
+            if self.straightness_ema < self.straight_off_threshold:
+                self.is_straight_state = False
+        else:
+            if self.straightness_ema > self.straight_on_threshold:
+                self.is_straight_state = True
+
+        finger_msg.straightness_score = self.straightness_ema
+        finger_msg.is_straight = self.is_straight_state
         finger_msg.confidence = msg.confidences[8] if len(msg.confidences) > 8 else 0.0
+
+        rospy.loginfo(f"Straightness  raw={raw_straightness:.3f}  ema={self.straightness_ema:.3f}  straight={self.is_straight_state}")
 
         self.finger_pub.publish(finger_msg)
 
