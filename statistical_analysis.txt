@@ -1,0 +1,65 @@
+POINTING LOCALIZATION — STATISTICAL ANALYSIS
+Source file: accuracy_1776963891.csv
+Contaminated trials excluded: T1h25t2, T2h25t1-2, T3h25t1-4
+============================================================
+
+1. DESCRIPTIVE STATISTICS BY HEIGHT
+------------------------------------------------------------
+Height 0 cm  (n=25)
+  Mean     : 27.6 mm
+  Median   : 25.1 mm
+  Std      : 12.4 mm
+  95% CI   : [22.5, 32.7] mm
+  Min/Max  : 9.1 / 54.7 mm
+Height 25 cm  (n=18)
+  Mean     : 58.4 mm
+  Median   : 52.5 mm
+  Std      : 34.8 mm
+  95% CI   : [41.1, 75.8] mm
+  Min/Max  : 16.6 / 139.7 mm
+Height 50 cm  (n=25)
+  Mean     : 61.1 mm
+  Median   : 61.3 mm
+  Std      : 32.0 mm
+  95% CI   : [47.9, 74.3] mm
+  Min/Max  : 3.7 / 132.6 mm
+
+2. NORMALITY TEST (Shapiro-Wilk, alpha=0.05)
+------------------------------------------------------------
+Height 0 cm: W=0.907  p=0.0262  -> NOT normal
+Height 25 cm: W=0.853  p=0.0093  -> NOT normal
+Height 50 cm: W=0.972  p=0.7085  -> normal
+
+3. KRUSKAL-WALLIS TEST (height effect on error)
+------------------------------------------------------------
+H=21.381  p=0.0000  -> significant (alpha=0.05)
+
+4. PAIRWISE MANN-WHITNEY U (post-hoc, Bonferroni alpha=0.017)
+------------------------------------------------------------
+0cm vs 25cm: U=75  p=0.0002  r=0.56  -> significant
+0cm vs 50cm: U=100  p=0.0000  r=0.58  -> significant
+25cm vs 50cm: U=204  p=0.6224  r=0.08  -> not significant
+
+5. DESCRIPTIVE STATISTICS BY TARGET (all heights)
+------------------------------------------------------------
+Target 1 (n=14): mean=53.7  median=40.5  std=42.3  95%CI=[29.3,78.1]
+Target 2 (n=13): mean=42.0  median=32.9  std=33.0  95%CI=[22.1,62.0]
+Target 3 (n=11): mean=45.0  median=31.3  std=21.3  95%CI=[30.6,59.3]
+Target 4 (n=15): mean=40.1  median=26.1  std=27.4  95%CI=[24.9,55.3]
+Target 5 (n=15): mean=58.4  median=49.1  std=27.4  95%CI=[43.2,73.6]
+
+6. AXIS BIAS AT HEIGHT 0 — one-sample t-test (mu=0)
+------------------------------------------------------------
+u-axis: mean=+9.2mm  std=4.4mm  95%CI=[+7.4,+11.0]  t=10.40  p=0.0000  -> systematic bias
+v-axis: mean=+14.4mm  std=25.0mm  95%CI=[+4.1,+24.8]  t=2.89  p=0.0081  -> systematic bias
+
+7. CORRELATION: error vs paper position (height 0)
+------------------------------------------------------------
+Error vs u_gt: r=0.522  p=0.0075  -> significant
+Error vs v_gt: r=0.447  p=0.0252  -> significant
+
+8. LATENCY STATISTICS (ms)
+------------------------------------------------------------
+Height 0 cm: mean=26.4  std=1.8  95%CI=[25.6,27.2]  min=23.1  max=29.4
+Height 25 cm: mean=27.0  std=1.8  95%CI=[26.1,27.9]  min=24.8  max=32.4
+Height 50 cm: mean=35.9  std=0.7  95%CI=[35.6,36.2]  min=34.5  max=37.6
