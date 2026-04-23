@@ -8,12 +8,6 @@
     <param name="fps" value="30"/>
     <param name="hole_filling" value="true"/>
     <param name="hole_filling_mode" value="1"/>
-    <!-- Auto-exposure ROI: bias AE toward the paper region (pixels in 1280×720 frame) -->
-    <param name="ae_roi_enabled" value="true"/>
-    <param name="ae_roi_x1" value="244"/>
-    <param name="ae_roi_y1" value="367"/>
-    <param name="ae_roi_x2" value="842"/>
-    <param name="ae_roi_y2" value="719"/>
   </node>
   
   <!-- Camera Calibration (manual) -->

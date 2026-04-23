@@ -30,14 +30,6 @@ class D435iDriver:
         self.hole_filling_enabled = rospy.get_param('~hole_filling', False)
         self.hole_filling_mode    = int(rospy.get_param('~hole_filling_mode', 1))
 
-        # Auto-exposure ROI (pixels in color frame; 0,0 = top-left)
-        # Set ae_roi_enabled=true and supply a rectangle to bias AE toward that region
-        self.ae_roi_enabled = rospy.get_param('~ae_roi_enabled', False)
-        self.ae_roi_x1 = int(rospy.get_param('~ae_roi_x1', 0))
-        self.ae_roi_y1 = int(rospy.get_param('~ae_roi_y1', 0))
-        self.ae_roi_x2 = int(rospy.get_param('~ae_roi_x2', self.width  - 1))
-        self.ae_roi_y2 = int(rospy.get_param('~ae_roi_y2', self.height - 1))
-        
         self.bridge = CvBridge()
         self.pipeline = None
         self.align = None
@@ -91,26 +83,6 @@ class D435iDriver:
                 rospy.loginfo(f"Hole filling filter ON (mode={self.hole_filling_mode})")
             else:
                 rospy.loginfo("Hole filling filter OFF")
-
-            # Auto-exposure ROI (optional)
-            if self.ae_roi_enabled:
-                roi = rs.region_of_interest()
-                roi.min_x = self.ae_roi_x1
-                roi.min_y = self.ae_roi_y1
-                roi.max_x = self.ae_roi_x2
-                roi.max_y = self.ae_roi_y2
-                for sensor in profile.get_device().sensors:
-                    try:
-                        sensor.set_region_of_interest(roi)
-                        name = sensor.get_info(rs.camera_info.name)
-                        rospy.loginfo(
-                            f"AE ROI set on [{name}]: ({self.ae_roi_x1},{self.ae_roi_y1}) "
-                            f"→ ({self.ae_roi_x2},{self.ae_roi_y2})"
-                        )
-                    except Exception:
-                        pass  # sensor does not support ROI (e.g. IMU)
-            else:
-                rospy.loginfo("AE ROI: disabled (full frame)")
 
             rospy.loginfo(f"D435i initialized successfully. Depth scale: {self.depth_scale}")
             return True

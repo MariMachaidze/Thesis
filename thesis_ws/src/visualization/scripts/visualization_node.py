@@ -187,10 +187,10 @@ class VisualizationNode:
 
             # Ray from fingertip to pointing target (projected back to camera pixels)
             if (self.finger_data and self.finger_data.is_straight
-                    and self.diag_pointing_raw is not None
+                    and self.target_data is not None and self.target_data.is_valid
                     and self._warp_M_inv is not None):
-                src   = np.array([[[self.diag_pointing_raw.x * self.WARP_W,
-                                    self.diag_pointing_raw.y * self.WARP_H]]], dtype=np.float32)
+                src   = np.array([[[self.target_data.u_normalized * self.WARP_W,
+                                    self.target_data.v_normalized * self.WARP_H]]], dtype=np.float32)
                 dst   = cv2.perspectiveTransform(src, self._warp_M_inv)
                 tx, ty = int(dst[0, 0, 0]), int(dst[0, 0, 1])
                 tip = pts[8]
