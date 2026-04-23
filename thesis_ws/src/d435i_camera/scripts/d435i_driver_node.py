@@ -24,6 +24,19 @@ class D435iDriver:
         self.width = rospy.get_param('~width', 1280)
         self.height = rospy.get_param('~height', 720)
         self.fps = rospy.get_param('~fps', 30)
+
+        # Hole filling filter
+        # mode 0 = fill_from_left, 1 = farest_from_around, 2 = nearest_from_around
+        self.hole_filling_enabled = rospy.get_param('~hole_filling', False)
+        self.hole_filling_mode    = int(rospy.get_param('~hole_filling_mode', 1))
+
+        # Auto-exposure ROI (pixels in color frame; 0,0 = top-left)
+        # Set ae_roi_enabled=true and supply a rectangle to bias AE toward that region
+        self.ae_roi_enabled = rospy.get_param('~ae_roi_enabled', False)
+        self.ae_roi_x1 = int(rospy.get_param('~ae_roi_x1', 0))
+        self.ae_roi_y1 = int(rospy.get_param('~ae_roi_y1', 0))
+        self.ae_roi_x2 = int(rospy.get_param('~ae_roi_x2', self.width  - 1))
+        self.ae_roi_y2 = int(rospy.get_param('~ae_roi_y2', self.height - 1))
         
         self.bridge = CvBridge()
         self.pipeline = None
@@ -69,7 +82,36 @@ class D435iDriver:
             
             # Create align object
             self.align = rs.align(rs.stream.color)
-            
+
+            # Hole filling filter (optional)
+            self.hole_filling_filter = None
+            if self.hole_filling_enabled:
+                self.hole_filling_filter = rs.hole_filling_filter()
+                self.hole_filling_filter.set_option(rs.option.holes_fill, self.hole_filling_mode)
+                rospy.loginfo(f"Hole filling filter ON (mode={self.hole_filling_mode})")
+            else:
+                rospy.loginfo("Hole filling filter OFF")
+
+            # Auto-exposure ROI (optional)
+            if self.ae_roi_enabled:
+                roi = rs.region_of_interest()
+                roi.min_x = self.ae_roi_x1
+                roi.min_y = self.ae_roi_y1
+                roi.max_x = self.ae_roi_x2
+                roi.max_y = self.ae_roi_y2
+                for sensor in profile.get_device().sensors:
+                    try:
+                        sensor.set_region_of_interest(roi)
+                        name = sensor.get_info(rs.camera_info.name)
+                        rospy.loginfo(
+                            f"AE ROI set on [{name}]: ({self.ae_roi_x1},{self.ae_roi_y1}) "
+                            f"→ ({self.ae_roi_x2},{self.ae_roi_y2})"
+                        )
+                    except Exception:
+                        pass  # sensor does not support ROI (e.g. IMU)
+            else:
+                rospy.loginfo("AE ROI: disabled (full frame)")
+
             rospy.loginfo(f"D435i initialized successfully. Depth scale: {self.depth_scale}")
             return True
             
@@ -85,10 +127,14 @@ class D435iDriver:
             
             color_frame = aligned_frames.get_color_frame()
             depth_frame = aligned_frames.get_depth_frame()
-            
+
             if not color_frame or not depth_frame:
                 return None, None
-            
+
+            # Apply hole filling if enabled
+            if self.hole_filling_filter is not None:
+                depth_frame = self.hole_filling_filter.process(depth_frame)
+
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
             

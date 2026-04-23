@@ -25,13 +25,15 @@ class CameraCalibrationNode:
         # Publisher
         self.calib_pub = rospy.Publisher('/camera/calibration', CalibrationData, queue_size=1, latch=True)
         
-        # Parameters
-        self.paper_width_mm = rospy.get_param('~paper_width_mm', 594.0)  # A4 landscape
-        self.paper_height_mm = rospy.get_param('~paper_height_mm', 841.0)
-        
-        # Camera intrinsics
-        self.fx = rospy.get_param('~fx', 640.0)
-        self.fy = rospy.get_param('~fy', 640.0)
+        # Parameters — paper dimensions in metres
+        # paper_x_m: long edge, direction TL→TR (x_axis)  = 850 mm
+        # paper_y_m: short edge, direction TL→BL (y_axis) = 600 mm
+        self.paper_x_m = rospy.get_param('~paper_x_m', 0.850)
+        self.paper_y_m = rospy.get_param('~paper_y_m', 0.600)
+
+        # Camera intrinsics (D435i spec)
+        self.fx = rospy.get_param('~fx', 901.47)
+        self.fy = rospy.get_param('~fy', 899.64)
         self.cx = rospy.get_param('~cx', 640.0)
         self.cy = rospy.get_param('~cy', 360.0)
         self.depth_scale = 0.001
@@ -107,21 +109,29 @@ class CameraCalibrationNode:
         if len(self.calibration_depths_3d) < 3:
             rospy.logwarn("Not enough valid depth points for calibration")
             return
-        
-        # Fit plane to first 3 points
-        p1, p2, p3 = self.calibration_depths_3d[0], self.calibration_depths_3d[1], self.calibration_depths_3d[2]
-        
-        v1 = p2 - p1
-        v2 = p3 - p1
-        
-        normal = np.cross(v1, v2)
+
+        p1 = self.calibration_depths_3d[0]
+        p2 = self.calibration_depths_3d[1]
+        p3 = self.calibration_depths_3d[2]
+
+        # Least-squares plane fit using all available clicked points via SVD.
+        # Stack points, subtract centroid, decompose — the normal is the last
+        # row of Vt (smallest singular value = direction of least variance).
+        pts = np.array(self.calibration_depths_3d, dtype=float)
+        centroid = pts.mean(axis=0)
+        _, _, Vt = np.linalg.svd(pts - centroid)
+        normal = Vt[-1]
+
+        # Ensure normal points toward the camera (positive Z component)
+        if normal[2] < 0:
+            normal = -normal
+
         norm = np.linalg.norm(normal)
-        
         if norm < 1e-8:
-            rospy.logerr("Cannot compute plane - points are collinear")
+            rospy.logerr("Cannot compute plane — SVD produced zero normal")
             return
-        
         normal = normal / norm
+
         self.paper_plane = (normal[0], normal[1], normal[2], -np.dot(normal, p1))
         
         # Calculate camera tilt
@@ -160,8 +170,8 @@ class CameraCalibrationNode:
         calib_msg.paper_y_axis.y = paper_y[1]
         calib_msg.paper_y_axis.z = paper_y[2]
         
-        calib_msg.paper_width_mm = self.paper_width_mm
-        calib_msg.paper_height_mm = self.paper_height_mm
+        calib_msg.paper_x_m = self.paper_x_m   # long edge 0.841 m (x_axis direction)
+        calib_msg.paper_y_m = self.paper_y_m   # short edge 0.594 m (y_axis direction)
         calib_msg.tilt_angle_rad = angle_rad
         calib_msg.distance_to_paper_m = avg_distance
         calib_msg.is_calibrated = True

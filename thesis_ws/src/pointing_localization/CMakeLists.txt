@@ -5,6 +5,8 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
   geometry_msgs
+  sensor_msgs
+  visualization_msgs
   finger_analysis
   camera_calibration
   message_generation
@@ -24,7 +26,7 @@ generate_messages(
 )
 
 catkin_package(
-  CATKIN_DEPENDS rospy std_msgs geometry_msgs finger_analysis camera_calibration message_runtime
+  CATKIN_DEPENDS rospy std_msgs geometry_msgs sensor_msgs visualization_msgs finger_analysis camera_calibration message_runtime
 )
 
 include_directories(

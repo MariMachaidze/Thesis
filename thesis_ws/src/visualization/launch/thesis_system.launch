@@ -6,16 +6,24 @@
     <param name="width" value="1280"/>
     <param name="height" value="720"/>
     <param name="fps" value="30"/>
+    <param name="hole_filling" value="true"/>
+    <param name="hole_filling_mode" value="1"/>
+    <!-- Auto-exposure ROI: bias AE toward the paper region (pixels in 1280×720 frame) -->
+    <param name="ae_roi_enabled" value="true"/>
+    <param name="ae_roi_x1" value="244"/>
+    <param name="ae_roi_y1" value="367"/>
+    <param name="ae_roi_x2" value="842"/>
+    <param name="ae_roi_y2" value="719"/>
   </node>
   
   <!-- Camera Calibration (manual) -->
   <node pkg="camera_calibration" type="camera_calibration_node.py" name="camera_calibration" output="screen">
-    <param name="paper_width_mm" value="594.0"/>
-    <param name="paper_height_mm" value="841.0"/>
-    <param name="fx" value="640.0"/>
-    <param name="fy" value="640.0"/>
-    <param name="cx" value="640.0"/>
-    <param name="cy" value="360.0"/>
+    <param name="paper_x_m" value="0.850"/>
+    <param name="paper_y_m" value="0.600"/>
+    <param name="fx" value="901.473"/>
+    <param name="fy" value="899.637"/>
+    <param name="cx" value="637.649"/>
+    <param name="cy" value="349.990"/>
   </node>
   
   <!-- Hand Detection -->
@@ -27,14 +35,19 @@
   <!-- Finger Analysis -->
   <node pkg="finger_analysis" type="finger_analysis_node.py" name="finger_analysis" output="screen">
     <param name="straightness_threshold" value="0.7"/>
-    <param name="fx" value="640.0"/>
-    <param name="fy" value="640.0"/>
-    <param name="cx" value="640.0"/>
-    <param name="cy" value="360.0"/>
-    <!-- One Euro Filter for landmark smoothing -->
+    <param name="fx" value="901.473"/>
+    <param name="fy" value="899.637"/>
+    <param name="cx" value="637.649"/>
+    <param name="cy" value="349.990"/>
+    <!-- One Euro Filter for landmark smoothing (knuckle + direction) -->
     <param name="filter_min_cutoff" value="1.0"/>
     <param name="filter_beta" value="0.007"/>
     <param name="filter_d_cutoff" value="1.0"/>
+    <!-- One Euro Filter for straightness score (set use_one_euro=true to activate) -->
+    <param name="use_one_euro"        value="true"/>
+    <param name="one_euro_min_cutoff" value="1.0"/>
+    <param name="one_euro_beta"       value="0.007"/>
+    <param name="one_euro_d_cutoff"   value="1.0"/>
   </node>
   
   <!-- Pointing Localization -->
@@ -42,15 +55,37 @@
     <param name="filter_min_cutoff" value="1.0"/>
     <param name="filter_beta" value="0.007"/>
     <param name="filter_d_cutoff" value="1.0"/>
+    <!-- Diagnostic: set true to print ray/intersection/uv every 0.5 s and publish /diag/pointing_raw -->
+    <param name="diagnose_pointing" value="true"/>
+    <!-- Bypass: set true to skip One Euro Filter and publish raw intersection uv directly -->
+    <param name="bypass_filters" value="false"/>
   </node>
-  
+
   <!-- Visualization -->
   <node pkg="visualization" type="visualization_node.py" name="visualization" output="screen">
     <param name="show_landmarks" value="true"/>
-    <param name="fx" value="640.0"/>
-    <param name="fy" value="640.0"/>
-    <param name="cx" value="640.0"/>
-    <param name="cy" value="360.0"/>
+    <param name="diagnose_hand" value="false"/>
+    <!-- Set true to draw crosshair on the live feed at the raw (u,v) pointing position -->
+    <param name="diagnose_pointing" value="true"/>
+    <param name="fx" value="901.473"/>
+    <param name="fy" value="899.637"/>
+    <param name="cx" value="637.649"/>
+    <param name="cy" value="349.990"/>
+  </node>
+
+  <!-- Sphero Pointing Controller -->
+  <node pkg="sphero_pointing" type="sphero_pointing_node.py" name="sphero_pointing" output="screen">
+    <param name="arrival_threshold" value="0.04"/>
+    <param name="max_speed" value="80"/>
+    <param name="min_speed" value="20"/>
+    <param name="speed_kp" value="200"/>
+    <param name="target_hold_time" value="0.5"/>
+    <param name="fx" value="901.473"/>
+    <param name="fy" value="899.637"/>
+    <param name="cx" value="637.649"/>
+    <param name="cy" value="349.990"/>
+    <!-- <param name="sphero_name" value="SB-FD03"/> -->
+    <!-- <param name="heading_offset" value="0.0"/> -->
   </node>
 
 </launch>

@@ -12,6 +12,8 @@ from geometry_msgs.msg import Point, Vector3
 from cv_bridge import CvBridge
 import cv2
 
+from std_msgs.msg import Float32
+
 from hand_detection.msg import Hand
 from finger_analysis.msg import FingerAnalysis
 
@@ -75,17 +77,26 @@ class FingerAnalysisNode:
         self.hand_sub = rospy.Subscriber('/hand/detection', Hand, self.hand_callback)
         self.depth_sub = rospy.Subscriber('/d435i/depth/image_raw', Image, self.depth_callback)
 
-        # Publisher
+        # Publishers
         self.finger_pub = rospy.Publisher('/finger/analysis', FingerAnalysis, queue_size=1)
+        self.raw_pub = rospy.Publisher('/diag/straightness_raw', Float32, queue_size=1)
 
         # Straightness hysteresis thresholds
-        self.straight_on_threshold = rospy.get_param('~straight_on_threshold', 0.75)
-        self.straight_off_threshold = rospy.get_param('~straight_off_threshold', 0.55)
+        self.straight_on_threshold = rospy.get_param('~straight_on_threshold', 0.65)
+        self.straight_off_threshold = rospy.get_param('~straight_off_threshold', 0.45)
         self.is_straight_state = False
 
-        # EMA smoothing for straightness score before hysteresis
-        self.straightness_ema_alpha = rospy.get_param('~straightness_ema_alpha', 0.3)
-        self.straightness_ema = None
+        # # Keep a small buffer for median filtering (commented out — One Euro is active)
+        # from collections import deque
+        # self.raw_history = deque(maxlen=3)
+
+        # # EMA smoothing for straightness score before hysteresis (commented out — One Euro is active)
+        # self.straightness_ema_alpha = rospy.get_param('~straightness_ema_alpha', 0.3)
+        self.straightness_ema = None  # kept so message field assignment doesn't crash
+
+        # Last valid values — used when depth fails so we publish last known instead of 0
+        self.last_valid_raw = None
+        self.last_valid_oe  = None
 
         # Camera intrinsics
         self.fx = rospy.get_param('~fx', 901.473)
@@ -94,9 +105,15 @@ class FingerAnalysisNode:
         self.cy = rospy.get_param('~cy', 349.990)
         self.depth_scale = 0.001
 
-        # Depth patch sizes for median filtering
-        self.depth_patch_size = rospy.get_param('~depth_patch_size', 5)
-        self.tip_patch_size = rospy.get_param('~tip_patch_size', 9)
+        # Patch size for median depth filtering (applied to all joints equally)
+        self.depth_patch_size = rospy.get_param('~depth_patch_size', 3)
+
+        # One Euro Filter on straightness score (optional, gated by ~use_one_euro)
+        self.use_one_euro = rospy.get_param('~use_one_euro', False)
+        oe_min_cutoff = rospy.get_param('~one_euro_min_cutoff', 1.0)
+        oe_beta       = rospy.get_param('~one_euro_beta', 0.007)
+        oe_d_cutoff   = rospy.get_param('~one_euro_d_cutoff', 1.0)
+        self.straightness_oe_filter = OneEuroFilter(oe_min_cutoff, oe_beta, oe_d_cutoff)
 
         # One Euro Filters — separate sets for knuckle origin and direction
         min_cutoff = rospy.get_param('~filter_min_cutoff', 1.0)
@@ -119,7 +136,8 @@ class FingerAnalysisNode:
         self.bridge = CvBridge()
         self.depth_image = None
 
-        rospy.loginfo("Finger Analysis Node: Ready (depth patch median + 3D One Euro Filter)")
+        oe_status = f"One Euro ON (min_cutoff={oe_min_cutoff}, beta={oe_beta})" if self.use_one_euro else "One Euro OFF (EMA active)"
+        rospy.loginfo(f"Finger Analysis Node: Ready — straightness filter: {oe_status}")
 
     def depth_callback(self, msg):
         """Store depth frame"""
@@ -128,9 +146,8 @@ class FingerAnalysisNode:
         except Exception as e:
             rospy.logerr(f"Depth error: {e}")
 
-    def get_3d_point(self, x, y, landmark_idx=None):
-        """Convert pixel to 3D using median depth patch for noise reduction.
-        Uses larger patch for fingertip (landmark 8) which is thin."""
+    def get_3d_point(self, x, y):
+        """Convert pixel to 3D using median depth patch for noise reduction."""
         if self.depth_image is None:
             return None
 
@@ -138,9 +155,7 @@ class FingerAnalysisNode:
         x = int(np.clip(x, 0, w-1))
         y = int(np.clip(y, 0, h-1))
 
-        # Larger patch for thin fingertip
-        patch_size = self.tip_patch_size if landmark_idx == 8 else self.depth_patch_size
-        half = patch_size // 2
+        half = self.depth_patch_size // 2
         y_min = max(0, y - half)
         y_max = min(h, y + half + 1)
         x_min = max(0, x - half)
@@ -193,7 +208,7 @@ class FingerAnalysisNode:
     def calculate_straightness(self, p5, p6, p7, p8):
         """Calculate straightness from the 4 index finger joints directly."""
         if any(p is None for p in [p5, p6, p7, p8]):
-            return 0.0
+            return None
 
         vec1 = p6 - p5
         vec2 = p7 - p6
@@ -203,14 +218,10 @@ class FingerAnalysisNode:
         for v1, v2 in [(vec1, vec2), (vec2, vec3)]:
             n1 = np.linalg.norm(v1)
             n2 = np.linalg.norm(v2)
-            if n1 > 1e-6 and n2 > 1e-6:
-                cos_a = np.dot(v1, v2) / (n1 * n2)
-                dots.append(float(np.clip(cos_a, -1.0, 1.0)))
-
-        if not dots:
-            return 0.0
-
-        # 1.0 = perfectly straight, 0.0 = bent 90 degrees, -1.0 = fully folded
+            if n1 < 1e-4 or n2 < 1e-4:
+                return None
+            cos_a = np.dot(v1, v2) / (n1 * n2)
+            dots.append(float(np.clip(cos_a, 0.0, 1.0)))
         return float(np.mean(dots))
 
     def hand_callback(self, msg):
@@ -231,7 +242,7 @@ class FingerAnalysisNode:
             px = int(pt.x * w)
             py = int(pt.y * h)
             finger_2d[idx] = (pt.x, pt.y)
-            raw_3d[idx] = self.get_3d_point(px, py, landmark_idx=idx)
+            raw_3d[idx] = self.get_3d_point(px, py)
 
         finger_msg = FingerAnalysis()
         finger_msg.header.stamp = msg.header.stamp
@@ -246,17 +257,19 @@ class FingerAnalysisNode:
         tip_2d.x, tip_2d.y = finger_2d[8]
         finger_msg.tip_2d = tip_2d
 
-        # Filter knuckle 3D position (ray origin)
-        if raw_3d[5] is not None:
-            kf = self.knuckle_filters
-            knuckle_filt = np.array([
-                kf[0](raw_3d[5][0], stamp_sec),
-                kf[1](raw_3d[5][1], stamp_sec),
-                kf[2](raw_3d[5][2], stamp_sec),
-            ])
-            finger_msg.knuckle_3d.x = knuckle_filt[0]
-            finger_msg.knuckle_3d.y = knuckle_filt[1]
-            finger_msg.knuckle_3d.z = knuckle_filt[2]
+        # Knuckle depth is required for a usable ray origin
+        if raw_3d[5] is None:
+            return
+
+        kf = self.knuckle_filters
+        knuckle_filt = np.array([
+            kf[0](raw_3d[5][0], stamp_sec),
+            kf[1](raw_3d[5][1], stamp_sec),
+            kf[2](raw_3d[5][2], stamp_sec),
+        ])
+        finger_msg.knuckle_3d.x = knuckle_filt[0]
+        finger_msg.knuckle_3d.y = knuckle_filt[1]
+        finger_msg.knuckle_3d.z = knuckle_filt[2]
 
         if raw_3d[8] is not None:
             finger_msg.tip_3d.x = raw_3d[8][0]
@@ -282,28 +295,63 @@ class FingerAnalysisNode:
             finger_msg.direction_3d.y = filt_dir[1]
             finger_msg.direction_3d.z = filt_dir[2]
 
-        # Straightness: raw score → EMA smoothing → hysteresis
-        raw_straightness = self.calculate_straightness(
-            raw_3d[5], raw_3d[6], raw_3d[7], raw_3d[8])
-        if self.straightness_ema is None:
-            self.straightness_ema = raw_straightness
-        else:
-            a = self.straightness_ema_alpha
-            self.straightness_ema = a * raw_straightness + (1 - a) * self.straightness_ema
+        raw = self.calculate_straightness(raw_3d[5], raw_3d[6], raw_3d[7], raw_3d[8])
+
+        # Publish raw score for diagnostics (before any smoothing)
+        if raw is not None:
+            self.raw_pub.publish(Float32(data=raw))
+
+        # # EMA computation commented out — One Euro filter is the active smoother
+        # if raw is not None:
+        #     self.raw_history.append(raw)
+        #     filtered = float(np.median(self.raw_history))
+        #     if self.straightness_ema is None:
+        #         self.straightness_ema = filtered
+        #     else:
+        #         a = self.straightness_ema_alpha
+        #         self.straightness_ema = a * filtered + (1 - a) * self.straightness_ema
+
+        # One Euro Filter on raw straightness (computed every frame regardless of gate,
+        # so the filter state stays warm and the value is always available in the message)
+        oe_val = self.straightness_oe_filter(raw, stamp_sec) if raw is not None else None
+
+        # Update hold-last trackers
+        if raw    is not None: self.last_valid_raw = raw
+        if oe_val is not None: self.last_valid_oe  = oe_val
 
         # Hysteresis: activate at on_threshold, deactivate at off_threshold
-        if self.is_straight_state:
-            if self.straightness_ema < self.straight_off_threshold:
-                self.is_straight_state = False
-        else:
-            if self.straightness_ema > self.straight_on_threshold:
-                self.is_straight_state = True
+        # Driven by One Euro filter
+        if oe_val is not None:
+            if self.is_straight_state:
+                if oe_val < self.straight_off_threshold:
+                    self.is_straight_state = False
+            else:
+                if oe_val > self.straight_on_threshold:
+                    self.is_straight_state = True
 
-        finger_msg.straightness_score = self.straightness_ema
+        # Populate all three filter outputs — use last valid value when depth fails
+        finger_msg.straightness_raw       = self.last_valid_raw if self.last_valid_raw is not None else 0.0
+        finger_msg.straightness_ema       = self.straightness_ema if self.straightness_ema is not None else 0.0
+        finger_msg.straightness_one_euro  = self.last_valid_oe  if self.last_valid_oe  is not None else 0.0
+
+        # Active output: One Euro when enabled, EMA otherwise
+        if self.use_one_euro and oe_val is not None:
+            finger_msg.straightness_score = oe_val
+        else:
+            finger_msg.straightness_score = finger_msg.straightness_ema
+
         finger_msg.is_straight = self.is_straight_state
         finger_msg.confidence = msg.confidences[8] if len(msg.confidences) > 8 else 0.0
 
-        rospy.loginfo(f"Straightness  raw={raw_straightness:.3f}  ema={self.straightness_ema:.3f}  straight={self.is_straight_state}")
+        # # Verbose comparison print commented out
+        # raw_s = f"{raw:.3f}" if raw is not None else "None"
+        # rospy.loginfo(
+        #     f"Straightness  raw={raw_s}"
+        #     f"  ema={finger_msg.straightness_ema:.3f}"
+        #     f"  oe={finger_msg.straightness_one_euro:.3f}"
+        #     f"  score={finger_msg.straightness_score:.3f}"
+        #     f"  straight={self.is_straight_state}"
+        # )
 
         self.finger_pub.publish(finger_msg)
 

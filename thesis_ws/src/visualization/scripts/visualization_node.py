@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Visualization Node
-Real-time display of hand tracking and pointing target
+Real-time display of hand tracking and pointing target.
+
+  "Hand Detection" — full 1280×720 camera feed with hand skeleton + pointing ray
+  "Paper View"     — perspective-corrected top-down paper view with hand + crosshair
+  "Top-Down View"  — perspective-corrected top-down paper view with pointing target
 """
 
 import rospy
@@ -9,6 +13,7 @@ import numpy as np
 import cv2
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point
+from std_msgs.msg import Float32
 from cv_bridge import CvBridge
 
 from hand_detection.msg import Hand
@@ -16,64 +21,82 @@ from finger_analysis.msg import FingerAnalysis
 from camera_calibration.msg import CalibrationData
 from pointing_localization.msg import PointingTarget
 
+
 class VisualizationNode:
+    # Output size of the warped paper view (pixels)
+    # paper_x_m = 0.850 → WARP_W,  paper_y_m = 0.600 → WARP_H
+    WARP_W = 850
+    WARP_H = 600
+
     def __init__(self):
         rospy.init_node('visualization_node', anonymous=False)
-        
+
         # Subscribers
-        self.rgb_sub = rospy.Subscriber('/d435i/rgb/image_raw', Image, self.rgb_callback)
-        self.hand_sub = rospy.Subscriber('/hand/detection', Hand, self.hand_callback)
-        self.finger_sub = rospy.Subscriber('/finger/analysis', FingerAnalysis, self.finger_callback)
-        self.calib_sub = rospy.Subscriber('/camera/calibration', CalibrationData, self.calib_callback)
-        self.target_sub = rospy.Subscriber('/pointing/target', PointingTarget, self.target_callback)
-        
+        self.rgb_sub           = rospy.Subscriber('/d435i/rgb/image_raw',      Image,          self.rgb_callback,   queue_size=1, buff_size=2**24)
+        self.hand_sub          = rospy.Subscriber('/hand/detection',            Hand,            self.hand_callback)
+        self.finger_sub        = rospy.Subscriber('/finger/analysis',           FingerAnalysis,  self.finger_callback)
+        self.calib_sub         = rospy.Subscriber('/camera/calibration',        CalibrationData, self.calib_callback)
+        self.target_sub        = rospy.Subscriber('/pointing/target',           PointingTarget,  self.target_callback)
+        self.raw_straight_sub  = rospy.Subscriber('/diag/straightness_raw',     Float32,         self._raw_straight_callback)
+        self.diag_pointing_sub = rospy.Subscriber('/diag/pointing_raw',         Point,           self._diag_pointing_callback)
+
         # Parameters
-        self.show_landmarks = rospy.get_param('~show_landmarks', True)
+        self.show_landmarks    = rospy.get_param('~show_landmarks',    True)
+        self.diagnose_hand     = rospy.get_param('~diagnose_hand',     False)
+        self.diagnose_pointing = rospy.get_param('~diagnose_pointing', False)
         self.fx = rospy.get_param('~fx', 640.0)
         self.fy = rospy.get_param('~fy', 640.0)
         self.cx = rospy.get_param('~cx', 640.0)
         self.cy = rospy.get_param('~cy', 360.0)
-        
+
         self.bridge = CvBridge()
-        
+
         # Data storage
-        self.rgb_frame = None
-        self.hand_data = None
-        self.finger_data = None
-        self.calib_data = None
-        self.target_data = None
-        
-        # Window setup
-        cv2.namedWindow('Thesis System - Hand Pointing')
-        cv2.namedWindow('Top-Down View')
-        
+        self.rgb_frame         = None
+        self.hand_data         = None
+        self.finger_data       = None
+        self.calib_data        = None
+        self.target_data       = None
+        self.raw_straightness  = None
+        self.diag_pointing_raw = None
+
+        # Warp matrix cache
+        self._warp_M           = None
+        self._warp_M_inv       = None
+        self._warp_calib_stamp = None
+
+        # Diagnostic publisher
+        self.diag_raw_pub = rospy.Publisher('/diag/straightness_raw', Float32, queue_size=1)
+
+        cv2.namedWindow('Hand Detection', cv2.WINDOW_NORMAL)
+        cv2.namedWindow('Top-Down View',  cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Top-Down View', self.WARP_W, self.WARP_H)
         rospy.loginfo("Visualization Node: Ready")
-    
+
+    # ================================================================
+    #  ROS callbacks
+    # ================================================================
     def rgb_callback(self, msg):
-        """Store RGB frame"""
         try:
             self.rgb_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
             rospy.logerr(f"Error converting RGB: {e}")
-    
-    def hand_callback(self, msg):
-        """Store hand data"""
-        self.hand_data = msg
-    
-    def finger_callback(self, msg):
-        """Store finger data"""
-        self.finger_data = msg
-    
-    def calib_callback(self, msg):
-        """Store calibration data"""
-        self.calib_data = msg
-    
-    def target_callback(self, msg):
-        """Store pointing target data"""
-        self.target_data = msg
-    
+
+    def hand_callback(self, msg):   self.hand_data = msg
+    def finger_callback(self, msg): self.finger_data = msg
+    def calib_callback(self, msg):  self.calib_data = msg
+    def target_callback(self, msg): self.target_data = msg
+
+    def _raw_straight_callback(self, msg):
+        self.raw_straightness = msg.data
+
+    def _diag_pointing_callback(self, msg):
+        self.diag_pointing_raw = msg
+
+    # ================================================================
+    #  Camera intrinsics helpers
+    # ================================================================
     def project_to_pixel(self, point_3d):
-        """Project a 3D camera-space point to pixel coordinates"""
         X, Y, Z = point_3d
         if Z <= 0:
             return None
@@ -81,201 +104,236 @@ class VisualizationNode:
         v = int(self.fy * Y / Z + self.cy)
         return u, v
 
-    def ray_plane_intersection(self, ray_origin, ray_direction, plane_normal, plane_point):
-        """Return the 3D point where the ray hits the plane, or None if parallel"""
-        denom = np.dot(plane_normal, ray_direction)
-        if abs(denom) < 1e-8:
-            return None
-        t = np.dot(plane_normal, plane_point - ray_origin) / denom
-        if t < 0:
-            return None
-        return ray_origin + t * ray_direction
+    # ================================================================
+    #  Perspective warp
+    # ================================================================
+    def _get_warp_matrix(self, calib_msg):
+        stamp = calib_msg.header.stamp.to_sec() if calib_msg.header.stamp.secs != 0 else None
+        if self._warp_M is not None and stamp == self._warp_calib_stamp:
+            return self._warp_M
 
-    def draw_hand(self, frame, hand_msg):
-        """Draw hand landmarks on frame"""
-        if not hand_msg.detected or len(hand_msg.keypoints_2d) == 0:
-            return
-        
-        h, w = frame.shape[:2]
-        
-        # MediaPipe hand connections
-        connections = [
-            (0, 1), (1, 2), (2, 3), (3, 4),  # Thumb
-            (0, 5), (5, 6), (6, 7), (7, 8),  # Index
-            (0, 9), (9, 10), (10, 11), (11, 12),  # Middle
-            (0, 13), (13, 14), (14, 15), (15, 16),  # Ring
-            (0, 17), (17, 18), (18, 19), (19, 20)  # Pinky
+        origin = np.array([calib_msg.plane_center.x,
+                           calib_msg.plane_center.y,
+                           calib_msg.plane_center.z])
+        x_axis = np.array([calib_msg.paper_x_axis.x,
+                           calib_msg.paper_x_axis.y,
+                           calib_msg.paper_x_axis.z])
+        y_axis = np.array([calib_msg.paper_y_axis.x,
+                           calib_msg.paper_y_axis.y,
+                           calib_msg.paper_y_axis.z])
+
+        corners_3d = [
+            origin,
+            origin + calib_msg.paper_x_m * x_axis,
+            origin + calib_msg.paper_x_m * x_axis + calib_msg.paper_y_m * y_axis,
+            origin + calib_msg.paper_y_m * y_axis,
         ]
-        
-        # Draw connections
-        for start, end in connections:
-            if start < len(hand_msg.keypoints_2d) and end < len(hand_msg.keypoints_2d):
-                pt1 = hand_msg.keypoints_2d[start]
-                pt2 = hand_msg.keypoints_2d[end]
-                
-                x1 = int(pt1.x * w)
-                y1 = int(pt1.y * h)
-                x2 = int(pt2.x * w)
-                y2 = int(pt2.y * h)
-                
-                cv2.line(frame, (x1, y1), (x2, y2), (200, 200, 200), 2)
-        
-        # Draw landmarks
-        colors = [(0, 255, 0)] * 21  # Green for all
-        colors[8] = (0, 255, 255)  # Cyan for fingertip
-        colors[5] = (255, 0, 0)  # Blue for knuckle
-        
-        for i, pt in enumerate(hand_msg.keypoints_2d):
-            x = int(pt.x * w)
-            y = int(pt.y * h)
-            cv2.circle(frame, (x, y), 5, colors[i], -1)
-    
-    def draw_finger_info(self, frame, finger_msg, calib_msg=None):
-        """Draw finger analysis info and 3D ray to paper plane"""
-        h, w = frame.shape[:2]
 
-        # Draw straightness info
-        straightness_text = f"Straightness: {finger_msg.straightness_score:.2f}"
-        color = (0, 255, 0) if finger_msg.is_straight else (0, 165, 255)
-        cv2.putText(frame, straightness_text, (10, h-100),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        src_pts = []
+        for pt in corners_3d:
+            px = self.project_to_pixel(pt)
+            if px is None:
+                return None
+            src_pts.append(list(px))
 
-        # Knuckle and tip in pixels
-        x1 = int(finger_msg.knuckle_2d.x * w)
-        y1 = int(finger_msg.knuckle_2d.y * h)
-        x2 = int(finger_msg.tip_2d.x * w)
-        y2 = int(finger_msg.tip_2d.y * h)
+        W, H = self.WARP_W, self.WARP_H
+        src = np.float32(src_pts)
+        dst = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
 
-        cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
-        cv2.circle(frame, (x1, y1), 8, (255, 0, 0), -1)
-        cv2.circle(frame, (x2, y2), 8, (0, 255, 255), -1)
+        self._warp_M           = cv2.getPerspectiveTransform(src, dst)
+        self._warp_M_inv       = np.linalg.inv(self._warp_M)
+        self._warp_calib_stamp = stamp
+        return self._warp_M
 
-        # Draw 3D ray to paper plane only if finger is straight and calibrated
-        if finger_msg.is_straight and calib_msg and calib_msg.is_calibrated:
-            knuckle_3d = np.array([finger_msg.knuckle_3d.x,
-                                   finger_msg.knuckle_3d.y,
-                                   finger_msg.knuckle_3d.z])
-            direction = np.array([finger_msg.direction_3d.x,
-                                  finger_msg.direction_3d.y,
-                                  finger_msg.direction_3d.z])
+    def _warp_frame(self, frame, calib_msg):
+        if calib_msg is None or not calib_msg.is_calibrated:
+            return None
+        M = self._get_warp_matrix(calib_msg)
+        if M is None:
+            return None
+        return cv2.warpPerspective(frame, M, (self.WARP_W, self.WARP_H))
 
-            if np.linalg.norm(knuckle_3d) > 1e-6 and np.linalg.norm(direction) > 1e-6:
-                plane_normal = np.array([calib_msg.plane_normal.x,
-                                         calib_msg.plane_normal.y,
-                                         calib_msg.plane_normal.z])
-                plane_point = np.array([calib_msg.plane_center.x,
-                                        calib_msg.plane_center.y,
-                                        calib_msg.plane_center.z])
+    def _transform_pts(self, norm_pts, frame_shape, M):
+        h, w = frame_shape[:2]
+        raw = np.float32([[p[0] * w, p[1] * h] for p in norm_pts]).reshape(-1, 1, 2)
+        warped = cv2.perspectiveTransform(raw, M)
+        return [(int(p[0][0]), int(p[0][1])) for p in warped]
 
-                intersection_3d = self.ray_plane_intersection(
-                    knuckle_3d, direction, plane_normal, plane_point)
+    # ================================================================
+    #  Draw: Hand Detection (full camera frame)
+    # ================================================================
+    def draw_hand_detection_view(self, frame):
+        out = frame  # caller already copied
+        h, w = out.shape[:2]
 
-                if intersection_3d is not None:
-                    px = self.project_to_pixel(intersection_3d)
-                    if px is not None:
-                        px_x, px_y = px
-                        # Ray from fingertip to landing point
-                        cv2.line(frame, (x2, y2), (px_x, px_y), (0, 200, 255), 2)
-                        # Landing dot on the paper surface
-                        cv2.circle(frame, (px_x, px_y), 12, (0, 0, 255), -1)
-                        cv2.circle(frame, (px_x, px_y), 14, (255, 255, 255), 2)
-    
-    def draw_topdown(self, calib_msg, target_msg):
-        """Draw top-down view of paper"""
-        A1_WIDTH_CM = 59.4
-        A1_HEIGHT_CM = 84.1
-        DISPLAY_SCALE = 0.7
-        
-        width = int(A1_WIDTH_CM * DISPLAY_SCALE * 10)
-        height = int(A1_HEIGHT_CM * DISPLAY_SCALE * 10)
-        
-        topdown = np.ones((height, width, 3), dtype=np.uint8) * 240
-        
-        # Draw grid
-        grid = int(DISPLAY_SCALE * 10)
-        for i in range(0, width, grid):
-            cv2.line(topdown, (i, 0), (i, height), (220, 220, 220), 1)
-        for i in range(0, height, grid):
-            cv2.line(topdown, (0, i), (width, i), (220, 220, 220), 1)
-        
-        # Draw border
-        cv2.rectangle(topdown, (0, 0), (width-1, height-1), (0, 200, 255), 3)
-        
-        # Draw pointing target
-        if target_msg and target_msg.is_valid:
-            px = int(target_msg.u_normalized * width)
-            py = int(target_msg.v_normalized * height)
-            
-            cv2.circle(topdown, (px, py), 20, (0, 0, 255), -1)
-            cv2.circle(topdown, (px, py), 22, (255, 255, 255), 2)
-            
-            text = f"({target_msg.u_mm:.1f}, {target_msg.v_mm:.1f}) mm"
-            cv2.putText(topdown, text, (max(10, px-80), min(height-10, py+40)),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        
-        # Draw title
-        cv2.putText(topdown, "Top-Down View (A1 Paper)", (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        
-        return topdown
-    
+        connections = [
+            (0,1),(1,2),(2,3),(3,4),
+            (0,5),(5,6),(6,7),(7,8),
+            (0,9),(9,10),(10,11),(11,12),
+            (0,13),(13,14),(14,15),(15,16),
+            (0,17),(17,18),(18,19),(19,20),
+        ]
+
+        if self.hand_data and self.hand_data.detected and len(self.hand_data.keypoints_2d) >= 21:
+            kp  = self.hand_data.keypoints_2d
+            pts = [(int(p.x * w), int(p.y * h)) for p in kp]
+
+            for s, e in connections:
+                cv2.line(out, pts[s], pts[e], (180, 180, 180), 2)
+
+            for i, pt in enumerate(pts):
+                color = (0, 255, 255) if i == 8 else (255, 80, 0) if i == 5 else (0, 200, 0)
+                cv2.circle(out, pt, 7, color, -1)
+
+            # Ray from fingertip to pointing target (projected back to camera pixels)
+            if (self.finger_data and self.finger_data.is_straight
+                    and self.diag_pointing_raw is not None
+                    and self._warp_M_inv is not None):
+                src   = np.array([[[self.diag_pointing_raw.x * self.WARP_W,
+                                    self.diag_pointing_raw.y * self.WARP_H]]], dtype=np.float32)
+                dst   = cv2.perspectiveTransform(src, self._warp_M_inv)
+                tx, ty = int(dst[0, 0, 0]), int(dst[0, 0, 1])
+                tip = pts[8]
+                cv2.line(out,   tip, (tx, ty), (0, 200, 255), 2)
+                cv2.circle(out, (tx, ty), 12, (0, 0, 200), -1)
+                cv2.circle(out, (tx, ty), 14, (255, 255, 255), 2)
+
+        # Status label
+        if self.hand_data and self.hand_data.detected:
+            cv2.putText(out, "HAND DETECTED", (12, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2, cv2.LINE_AA)
+        else:
+            cv2.putText(out, "No hand", (12, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 60, 220), 2, cv2.LINE_AA)
+
+        if self.finger_data:
+            s_text  = f"Straight: {self.finger_data.straightness_score:.2f}"
+            s_color = (0, 255, 0) if self.finger_data.is_straight else (0, 140, 255)
+            cv2.putText(out, s_text, (12, h - 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, s_color, 2, cv2.LINE_AA)
+
+        return out
+
+    # ================================================================
+    #  Draw: Paper View
+    # ================================================================
+    def draw_paper_view(self, warped, frame_shape, calib_msg):
+        M = self._get_warp_matrix(calib_msg)
+        W, H = self.WARP_W, self.WARP_H
+
+        if self.hand_data and self.hand_data.detected and len(self.hand_data.keypoints_2d) >= 21:
+            connections = [
+                (0,1),(1,2),(2,3),(3,4),
+                (0,5),(5,6),(6,7),(7,8),
+                (0,9),(9,10),(10,11),(11,12),
+                (0,13),(13,14),(14,15),(15,16),
+                (0,17),(17,18),(18,19),(19,20),
+            ]
+            kp  = self.hand_data.keypoints_2d
+            pts = self._transform_pts([(p.x, p.y) for p in kp], frame_shape, M)
+
+            for s, e in connections:
+                cv2.line(warped, pts[s], pts[e], (180, 180, 180), 1)
+
+            for i, pt in enumerate(pts):
+                color = (0, 255, 255) if i == 8 else (255, 80, 0) if i == 5 else (0, 200, 0)
+                cv2.circle(warped, pt, 5, color, -1)
+
+        if (self.finger_data and self.finger_data.is_straight
+                and self.diag_pointing_raw is not None):
+            tx = int(self.diag_pointing_raw.x * W)
+            ty = int(self.diag_pointing_raw.y * H)
+            if self.hand_data and len(self.hand_data.keypoints_2d) >= 9:
+                tip   = self.hand_data.keypoints_2d[8]
+                tip_w = self._transform_pts([(tip.x, tip.y)], frame_shape, M)[0]
+                cv2.line(warped, tip_w, (tx, ty), (0, 200, 255), 2)
+            cv2.circle(warped, (tx, ty), 10, (0, 0, 200), -1)
+            cv2.circle(warped, (tx, ty), 12, (255, 255, 255), 2)
+
+        if self.target_data and self.target_data.is_valid:
+            tx  = int(self.target_data.u_normalized * W)
+            ty  = int(self.target_data.v_normalized * H)
+            arm = 18
+            cv2.line(warped,   (tx - arm, ty), (tx + arm, ty), (0, 255, 0), 2)
+            cv2.line(warped,   (tx, ty - arm), (tx, ty + arm), (0, 255, 0), 2)
+            cv2.circle(warped, (tx, ty), 8, (0, 255, 0), 2)
+            cv2.putText(warped, f"({self.target_data.u_normalized:.2f},{self.target_data.v_normalized:.2f})",
+                        (tx + 14, ty - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+
+        label = "HAND DETECTED" if (self.hand_data and self.hand_data.detected) else "No hand"
+        color = (0, 255, 0)    if (self.hand_data and self.hand_data.detected) else (0, 60, 220)
+        cv2.putText(warped, label, (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+
+        if self.finger_data:
+            s_text  = f"Straight: {self.finger_data.straightness_score:.2f}"
+            s_color = (0, 255, 0) if self.finger_data.is_straight else (0, 140, 255)
+            cv2.putText(warped, s_text, (8, H - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, s_color, 1, cv2.LINE_AA)
+
+        cv2.putText(warped, "Paper View", (W - 110, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+
+    # ================================================================
+    #  Draw: Top-Down View
+    # ================================================================
+    def draw_topdown_view(self, warped):
+        W, H = self.WARP_W, self.WARP_H
+
+        if self.target_data and self.target_data.is_valid:
+            tx  = int(self.target_data.u_normalized * W)
+            ty  = int(self.target_data.v_normalized * H)
+            arm = 20
+            cv2.line(warped,   (tx - arm, ty), (tx + arm, ty), (0, 255, 0), 2)
+            cv2.line(warped,   (tx, ty - arm), (tx, ty + arm), (0, 255, 0), 2)
+            cv2.circle(warped, (tx, ty), 10, (0, 255, 0), 2)
+            cv2.putText(warped,
+                        f"Target ({self.target_data.u_normalized:.2f},{self.target_data.v_normalized:.2f})",
+                        (tx + 14, ty - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+
+        cv2.putText(warped, "Top-Down View", (W - 130, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+    # ================================================================
+    #  Main loop
+    # ================================================================
     def spin(self):
-        """Main loop"""
         rate = rospy.Rate(30)
-        
+
         while not rospy.is_shutdown():
-            if self.rgb_frame is not None:
-                display = self.rgb_frame.copy()
-                h, w = display.shape[:2]
-                
-                # Draw hand
-                if self.hand_data and self.hand_data.detected:
-                    self.draw_hand(display, self.hand_data)
-                
-                # Draw finger analysis
-                if self.finger_data:
-                    self.draw_finger_info(display, self.finger_data, self.calib_data)
-                
-                # Draw status
-                if self.hand_data and self.hand_data.detected:
-                    cv2.putText(display, "HAND DETECTED", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                else:
-                    cv2.putText(display, "No hand detected", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                
-                # Draw calibration status
-                if self.calib_data and self.calib_data.is_calibrated:
-                    cv2.putText(display, "Calibrated", (w-200, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    
-                    # Draw tilt info
-                    tilt_deg = np.degrees(self.calib_data.tilt_angle_rad)
-                    cv2.putText(display, f"Tilt: {tilt_deg:.1f}°", (10, h-50),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-                else:
-                    cv2.putText(display, "Not calibrated", (w-200, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
-                
-                cv2.imshow('Thesis System - Hand Pointing', display)
-                
-                # Draw top-down view
-                if self.calib_data and self.calib_data.is_calibrated:
-                    topdown = self.draw_topdown(self.calib_data, self.target_data)
-                    cv2.imshow('Top-Down View', topdown)
-            
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            if self.rgb_frame is None:
+                rate.sleep()
+                continue
+
+            frame = self.rgb_frame.copy()
+
+            # Hand Detection window: draw on a fresh copy, show immediately
+            cv2.imshow('Hand Detection', self.draw_hand_detection_view(frame.copy()))
+
+            # Top-Down View: only once calibration is ready
+            if self.calib_data is not None and self.calib_data.is_calibrated:
+                warped = self._warp_frame(frame, self.calib_data)
+                if warped is not None:
+                    topdown_view = warped.copy()
+                    self.draw_topdown_view(topdown_view)
+                    cv2.imshow('Top-Down View', topdown_view)
+
+            if self.diagnose_hand and self.raw_straightness is not None:
+                self.diag_raw_pub.publish(Float32(data=self.raw_straightness))
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-            
+
             rate.sleep()
-        
+
         cv2.destroyAllWindows()
-    
+
     def cleanup(self):
-        """Cleanup"""
         cv2.destroyAllWindows()
         rospy.loginfo("Visualization Node: Cleanup complete")
+
 
 if __name__ == '__main__':
     try:

@@ -30,3 +30,24 @@ REFACTORING_SUMMARY.md
 
 measure_tilt_imu.py
 measure_tilt.py
+
+version_1.py
+version_2.py
+version_3.py
+version_4.py
+version_5.py
+version_6.py
+sphero_connect.py
+sphero.py
+test_ae_lock.py
+test_depth_capture.py
+test_sphero_15cm.py
+test_sphero_detect.py
+test_sphero_IR.py
+ball_tracker.py
+depth_capture_ae.py
+depth_realtime_diff.py
+dump_sensor_options.py
+depth_tests
+sphero_env
+catkin_ws

@@ -11,6 +11,7 @@ import time
 from finger_analysis.msg import FingerAnalysis
 from camera_calibration.msg import CalibrationData
 from pointing_localization.msg import PointingTarget
+from geometry_msgs.msg import Point
 
 
 class OneEuroFilter:
@@ -93,6 +94,16 @@ class PointingLocalizationNode:
         self.filter_u = OneEuroFilter(min_cutoff, beta, d_cutoff)
         self.filter_v = OneEuroFilter(min_cutoff, beta, d_cutoff)
 
+        # Diagnostic / bypass parameters
+        self.diagnose_pointing = rospy.get_param('~diagnose_pointing', False)
+        self.bypass_filters = rospy.get_param('~bypass_filters', False)
+        self._last_diag_time = 0.0
+        if self.diagnose_pointing:
+            self.diag_pointing_pub = rospy.Publisher('/diag/pointing_raw', Point, queue_size=1)
+            rospy.loginfo("Pointing Localization Node: diagnose_pointing=True — diagnostic mode active")
+        if self.bypass_filters:
+            rospy.loginfo("Pointing Localization Node: bypass_filters=True — One Euro Filter disabled")
+
         rospy.loginfo("Pointing Localization Node: Ready (One Euro Filter)")
     
     def calib_callback(self, msg):
@@ -151,10 +162,10 @@ class PointingLocalizationNode:
         x_coord = np.dot(v, x_axis)
         y_coord = np.dot(v, y_axis)
         
-        # Normalize to paper dimensions
-        x_norm = x_coord / (self.calibration.paper_width_mm / 1000.0)
-        y_norm = y_coord / (self.calibration.paper_height_mm / 1000.0)
-        
+        # Normalize: paper_x_m is the long edge (x_axis), paper_y_m the short edge (y_axis)
+        x_norm = x_coord / self.calibration.paper_x_m
+        y_norm = y_coord / self.calibration.paper_y_m
+
         # Convert to mm on paper
         x_mm = x_coord * 1000.0
         y_mm = y_coord * 1000.0
@@ -207,15 +218,37 @@ class PointingLocalizationNode:
                 
                 # Check if within paper bounds
                 if 0.0 <= x_norm <= 1.0 and 0.0 <= y_norm <= 1.0:
-                    # Apply One Euro Filter
-                    t = msg.header.stamp.to_sec()
-                    filtered_u = self.filter_u.filter(x_norm, t)
-                    filtered_v = self.filter_v.filter(y_norm, t)
+                    # --- Diagnostic output (throttled to 0.5 s) ---
+                    if self.diagnose_pointing:
+                        now = time.time()
+                        if now - self._last_diag_time >= 0.5:
+                            self._last_diag_time = now
+                            rospy.loginfo(
+                                f"[DIAG pointing] "
+                                f"ray_origin={knuckle_3d.tolist()} "
+                                f"ray_dir={direction.tolist()} "
+                                f"intersection={intersection_3d.tolist()} "
+                                f"(u,v)=({x_norm:.4f}, {y_norm:.4f})"
+                            )
+                            diag_pt = Point()
+                            diag_pt.x = float(x_norm)
+                            diag_pt.y = float(y_norm)
+                            diag_pt.z = 0.0
+                            self.diag_pointing_pub.publish(diag_pt)
+
+                    # Apply One Euro Filter (or bypass)
+                    if self.bypass_filters:
+                        filtered_u = x_norm
+                        filtered_v = y_norm
+                    else:
+                        t = msg.header.stamp.to_sec()
+                        filtered_u = self.filter_u.filter(x_norm, t)
+                        filtered_v = self.filter_v.filter(y_norm, t)
 
                     target_msg.u_normalized = filtered_u
                     target_msg.v_normalized = filtered_v
-                    target_msg.u_mm = filtered_u * self.calibration.paper_width_mm
-                    target_msg.v_mm = filtered_v * self.calibration.paper_height_mm
+                    target_msg.u_mm = filtered_u * self.calibration.paper_x_m * 1000.0
+                    target_msg.v_mm = filtered_v * self.calibration.paper_y_m * 1000.0
                     target_msg.is_valid = True
                 else:
                     target_msg.is_valid = False
