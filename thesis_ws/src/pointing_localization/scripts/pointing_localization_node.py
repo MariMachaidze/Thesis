@@ -174,9 +174,13 @@ class PointingLocalizationNode:
     
     def finger_callback(self, msg):
         """Process finger analysis and publish pointing target"""
+        rospy.loginfo_throttle(1.0,
+            f"[PL] is_straight={msg.is_straight}  score={msg.straightness_score:.3f}  "
+            f"knuckle=({msg.knuckle_3d.x:.3f},{msg.knuckle_3d.y:.3f},{msg.knuckle_3d.z:.3f})")
+
         if not msg.is_straight:
             return  # Only publish if finger is straight
-        
+
         if self.calibration is None or not self.calibration.is_calibrated:
             rospy.logwarn_once("Calibration not yet received")
             return
@@ -215,8 +219,13 @@ class PointingLocalizationNode:
             if coords_norm is not None:
                 x_norm, y_norm = coords_norm
                 x_mm, y_mm = coords_mm
-                
-                # Check if within paper bounds
+
+                rospy.loginfo_throttle(0.5, f"[PL] raw_uv=({x_norm:.3f},{y_norm:.3f})")
+
+                # Only update OEF and publish when the intersection is on the paper.
+                # Out-of-bounds frames come from bad direction estimates during transitions
+                # and would poison the OEF state — keeping the bounds check here ensures
+                # the filter state stays clean regardless of transient noisy frames.
                 if 0.0 <= x_norm <= 1.0 and 0.0 <= y_norm <= 1.0:
                     # --- Diagnostic output (throttled to 0.5 s) ---
                     if self.diagnose_pointing:
@@ -245,6 +254,10 @@ class PointingLocalizationNode:
                         filtered_u = self.filter_u.filter(x_norm, t)
                         filtered_v = self.filter_v.filter(y_norm, t)
 
+                    lag = np.hypot(filtered_u - x_norm, filtered_v - y_norm)
+                    rospy.loginfo_throttle(0.5,
+                        f"[PL] filt_uv=({filtered_u:.3f},{filtered_v:.3f})  OEF_lag={lag:.4f}")
+
                     target_msg.u_normalized = filtered_u
                     target_msg.v_normalized = filtered_v
                     target_msg.u_mm = filtered_u * self.calibration.paper_x_m * 1000.0
@@ -252,7 +265,6 @@ class PointingLocalizationNode:
                     target_msg.is_valid = True
                 else:
                     target_msg.is_valid = False
-                    rospy.logdebug(f"Pointing target outside paper: ({x_norm:.2f}, {y_norm:.2f})")
             else:
                 target_msg.is_valid = False
         else:

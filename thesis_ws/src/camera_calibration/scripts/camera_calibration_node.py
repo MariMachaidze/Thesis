@@ -7,6 +7,8 @@ Detects white paper plane and stores calibration data
 import rospy
 import numpy as np
 import cv2
+import os
+import yaml
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point, Vector3
 from cv_bridge import CvBridge
@@ -32,10 +34,10 @@ class CameraCalibrationNode:
         self.paper_y_m = rospy.get_param('~paper_y_m', 0.600)
 
         # Camera intrinsics (D435i spec)
-        self.fx = rospy.get_param('~fx', 901.47)
-        self.fy = rospy.get_param('~fy', 899.64)
-        self.cx = rospy.get_param('~cx', 640.0)
-        self.cy = rospy.get_param('~cy', 360.0)
+        self.fx = rospy.get_param('~fx', 901.473)
+        self.fy = rospy.get_param('~fy', 899.637)
+        self.cx = rospy.get_param('~cx', 642.351)
+        self.cy = rospy.get_param('~cy', 349.990)
         self.depth_scale = 0.001
         
         self.bridge = CvBridge()
@@ -44,15 +46,93 @@ class CameraCalibrationNode:
         self.calibration_points = []
         self.calibration_depths_3d = []
         self.calibrated = False
-        self.paper_plane = None
-        
-        # Set up mouse callback
-        cv2.namedWindow('Camera Calibration')
-        cv2.setMouseCallback('Camera Calibration', self.mouse_callback)
-        
-        rospy.loginfo("Camera Calibration Node: Ready. Click 4 corners of white paper.")
-        rospy.loginfo("Corners: 1=Top-Left, 2=Top-Right, 3=Bottom-Left, 4=Bottom-Right")
+
+        # Persistent calibration
+        self.calibration_file = os.path.expanduser(
+            rospy.get_param('~calibration_file', '~/.ros/paper_calibration.yaml')
+        )
+        self.recalibrate = rospy.get_param('~recalibrate', False)
+        self.loaded_from_file = False
+
+        # Try to load saved calibration; fall through to click UI if not available
+        if not self.recalibrate and self._try_load_calibration():
+            self.loaded_from_file = True
+            rospy.loginfo(f"Loaded calibration from {self.calibration_file}")
+            rospy.loginfo("Pass ~recalibrate:=true (or delete the file) to redo.")
+        else:
+            cv2.namedWindow('Camera Calibration')
+            cv2.setMouseCallback('Camera Calibration', self.mouse_callback)
+            rospy.loginfo("Camera Calibration Node: Ready. Click 4 corners of white paper.")
+            rospy.loginfo("Corners: 1=Top-Left, 2=Top-Right, 3=Bottom-Left, 4=Bottom-Right")
     
+    def _try_load_calibration(self):
+        """Load a previously saved calibration and publish it. Returns True on success."""
+        if not os.path.exists(self.calibration_file):
+            return False
+        try:
+            with open(self.calibration_file, 'r') as f:
+                data = yaml.safe_load(f)
+
+            if not data:
+                rospy.logwarn(f"Calibration file is empty: {self.calibration_file} — will re-click")
+                return False
+
+            # Warn if saved intrinsics diverge from current — calibration is baked
+            # with the intrinsics used at capture time
+            saved = data.get('intrinsics', {})
+            def _diff(k, cur):
+                return abs(saved.get(k, cur) - cur) > 0.01
+            if any(_diff(k, v) for k, v in [('fx', self.fx), ('fy', self.fy),
+                                            ('cx', self.cx), ('cy', self.cy)]):
+                rospy.logwarn("Saved calibration intrinsics differ from current — consider ~recalibrate:=true")
+                rospy.logwarn(f"  saved : fx={saved.get('fx')} fy={saved.get('fy')} cx={saved.get('cx')} cy={saved.get('cy')}")
+                rospy.logwarn(f"  current: fx={self.fx} fy={self.fy} cx={self.cx} cy={self.cy}")
+
+            msg = CalibrationData()
+            msg.header.stamp = rospy.Time.now()
+            msg.header.frame_id = "d435i_depth_frame"
+            msg.plane_normal.x, msg.plane_normal.y, msg.plane_normal.z = data['plane_normal']
+            msg.plane_center.x, msg.plane_center.y, msg.plane_center.z = data['plane_center']
+            msg.paper_x_axis.x, msg.paper_x_axis.y, msg.paper_x_axis.z = data['paper_x_axis']
+            msg.paper_y_axis.x, msg.paper_y_axis.y, msg.paper_y_axis.z = data['paper_y_axis']
+            msg.paper_x_m = float(data['paper_x_m'])
+            msg.paper_y_m = float(data['paper_y_m'])
+            msg.tilt_angle_rad = float(data['tilt_angle_rad'])
+            msg.distance_to_paper_m = float(data['distance_to_paper_m'])
+            msg.is_calibrated = True
+
+            # Don't publish here — rospy hasn't registered the publisher with the
+            # master yet so early publishes are silently dropped even on latched topics.
+            # spin() will publish after a short delay once the node is running.
+            self._loaded_calib_msg = msg
+            self.calibrated = True
+            return True
+        except Exception as e:
+            rospy.logwarn(f"Failed to load calibration from {self.calibration_file}: {e}")
+            return False
+
+    def _save_calibration(self, msg):
+        """Persist calibration so next run skips the click UI."""
+        def _f(v): return float(v)   # force Python float — yaml.safe_dump rejects numpy types
+        data = {
+            'plane_normal': [_f(msg.plane_normal.x), _f(msg.plane_normal.y), _f(msg.plane_normal.z)],
+            'plane_center': [_f(msg.plane_center.x), _f(msg.plane_center.y), _f(msg.plane_center.z)],
+            'paper_x_axis': [_f(msg.paper_x_axis.x), _f(msg.paper_x_axis.y), _f(msg.paper_x_axis.z)],
+            'paper_y_axis': [_f(msg.paper_y_axis.x), _f(msg.paper_y_axis.y), _f(msg.paper_y_axis.z)],
+            'paper_x_m': _f(msg.paper_x_m),
+            'paper_y_m': _f(msg.paper_y_m),
+            'tilt_angle_rad': _f(msg.tilt_angle_rad),
+            'distance_to_paper_m': _f(msg.distance_to_paper_m),
+            'intrinsics': {'fx': _f(self.fx), 'fy': _f(self.fy), 'cx': _f(self.cx), 'cy': _f(self.cy)},
+        }
+        try:
+            os.makedirs(os.path.dirname(self.calibration_file), exist_ok=True)
+            with open(self.calibration_file, 'w') as f:
+                yaml.safe_dump(data, f)
+            rospy.loginfo(f"Saved calibration → {self.calibration_file}")
+        except Exception as e:
+            rospy.logwarn(f"Failed to save calibration: {e}")
+
     def get_depth_at(self, x, y, patch_size=5):
         """Get median depth around a pixel for robustness"""
         if self.depth_frame is None:
@@ -177,12 +257,14 @@ class CameraCalibrationNode:
         calib_msg.is_calibrated = True
         
         self.calib_pub.publish(calib_msg)
-        
+
         self.calibrated = True
         rospy.loginfo("Calibration complete!")
         rospy.loginfo(f"  Plane normal: {normal}")
         rospy.loginfo(f"  Tilt angle: {angle_deg:.2f}°")
         rospy.loginfo(f"  Distance: {avg_distance:.3f}m")
+
+        self._save_calibration(calib_msg)
     
     def rgb_callback(self, msg):
         """Store RGB frame"""
@@ -200,8 +282,20 @@ class CameraCalibrationNode:
     
     def spin(self):
         """Main loop"""
+        # If calibration was loaded from file, publish it now that the node is
+        # fully running and other nodes have had time to subscribe.
+        if self.loaded_from_file:
+            rospy.loginfo("Waiting 1 s for subscribers before publishing saved calibration...")
+            rospy.sleep(1.0)
+            self._loaded_calib_msg.header.stamp = rospy.Time.now()
+            self.calib_pub.publish(self._loaded_calib_msg)
+            rospy.loginfo("Saved calibration published.")
+            rospy.loginfo("Pass ~recalibrate:=true (or delete the file) to redo.")
+            rospy.spin()
+            return
+
         rate = rospy.Rate(10)
-        
+
         while not rospy.is_shutdown():
             if self.rgb_frame is not None:
                 display = self.rgb_frame.copy()

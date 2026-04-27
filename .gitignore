@@ -44,7 +44,7 @@ test_depth_capture.py
 test_sphero_15cm.py
 test_sphero_detect.py
 test_sphero_IR.py
-ball_tracker.py
+#ball_tracker.py
 depth_capture_ae.py
 depth_realtime_diff.py
 dump_sensor_options.py

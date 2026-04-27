@@ -7,6 +7,7 @@ Analyzes index finger straightness and computes 3D positions
 import rospy
 import numpy as np
 import time
+from collections import deque
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point, Vector3
 from cv_bridge import CvBridge
@@ -73,9 +74,9 @@ class FingerAnalysisNode:
     def __init__(self):
         rospy.init_node('finger_analysis_node', anonymous=False)
 
-        # Subscribers
-        self.hand_sub = rospy.Subscriber('/hand/detection', Hand, self.hand_callback)
-        self.depth_sub = rospy.Subscriber('/d435i/depth/image_raw', Image, self.depth_callback)
+        # Subscribers — queue_size=1 + buff_size so we never process stale depth frames
+        self.hand_sub  = rospy.Subscriber('/hand/detection',         Hand,  self.hand_callback,  queue_size=1)
+        self.depth_sub = rospy.Subscriber('/d435i/depth/image_raw',  Image, self.depth_callback, queue_size=1, buff_size=2**24)
 
         # Publishers
         self.finger_pub = rospy.Publisher('/finger/analysis', FingerAnalysis, queue_size=1)
@@ -86,14 +87,6 @@ class FingerAnalysisNode:
         self.straight_off_threshold = rospy.get_param('~straight_off_threshold', 0.45)
         self.is_straight_state = False
 
-        # # Keep a small buffer for median filtering (commented out — One Euro is active)
-        # from collections import deque
-        # self.raw_history = deque(maxlen=3)
-
-        # # EMA smoothing for straightness score before hysteresis (commented out — One Euro is active)
-        # self.straightness_ema_alpha = rospy.get_param('~straightness_ema_alpha', 0.3)
-        self.straightness_ema = None  # kept so message field assignment doesn't crash
-
         # Last valid values — used when depth fails so we publish last known instead of 0
         self.last_valid_raw = None
         self.last_valid_oe  = None
@@ -101,57 +94,80 @@ class FingerAnalysisNode:
         # Camera intrinsics
         self.fx = rospy.get_param('~fx', 901.473)
         self.fy = rospy.get_param('~fy', 899.637)
-        self.cx = rospy.get_param('~cx', 637.649)
+        self.cx = rospy.get_param('~cx', 642.351)
         self.cy = rospy.get_param('~cy', 349.990)
         self.depth_scale = 0.001
 
         # Patch size for median depth filtering (applied to all joints equally)
         self.depth_patch_size = rospy.get_param('~depth_patch_size', 3)
 
-        # One Euro Filter on straightness score (optional, gated by ~use_one_euro)
-        self.use_one_euro = rospy.get_param('~use_one_euro', False)
+        # One Euro Filter on straightness score
         oe_min_cutoff = rospy.get_param('~one_euro_min_cutoff', 1.0)
         oe_beta       = rospy.get_param('~one_euro_beta', 0.007)
         oe_d_cutoff   = rospy.get_param('~one_euro_d_cutoff', 1.0)
         self.straightness_oe_filter = OneEuroFilter(oe_min_cutoff, oe_beta, oe_d_cutoff)
 
-        # One Euro Filters — separate sets for knuckle origin and direction
+        # One Euro Filters — one set per finger joint (12 filters total for 4 joints × 3 axes).
+        # Direction is derived from the *filtered* joints so origin and direction stay
+        # temporally consistent (no separate direction filter on the unit vector).
         min_cutoff = rospy.get_param('~filter_min_cutoff', 1.0)
         beta = rospy.get_param('~filter_beta', 0.007)
         d_cutoff = rospy.get_param('~filter_d_cutoff', 1.0)
+        self.joint_filters = {
+            idx: tuple(OneEuroFilter(min_cutoff, beta, d_cutoff) for _ in range(3))
+            for idx in self.FINGER_INDICES
+        }
 
-        # Filter knuckle 3D position (ray origin) — 3 axes
-        self.knuckle_filters = (
-            OneEuroFilter(min_cutoff, beta, d_cutoff),
-            OneEuroFilter(min_cutoff, beta, d_cutoff),
-            OneEuroFilter(min_cutoff, beta, d_cutoff),
-        )
-        # Filter direction vector (knuckle→tip) — 3 axes
-        self.direction_filters = (
-            OneEuroFilter(min_cutoff, beta, d_cutoff),
-            OneEuroFilter(min_cutoff, beta, d_cutoff),
-            OneEuroFilter(min_cutoff, beta, d_cutoff),
-        )
+        # Depth buffer: match depth frame to the hand message's source stamp so we
+        # don't pair a hand detected at frame N with depth from frame N+1/N+2.
+        self.depth_buffer_size = int(rospy.get_param('~depth_buffer_size', 10))
+        self.depth_buffer = deque(maxlen=self.depth_buffer_size)
+
+        # Reset filters after N consecutive hand-undetected frames, so a re-acquired
+        # hand isn't smeared toward the stale pre-gap position.
+        self.hand_loss_reset_frames = int(rospy.get_param('~hand_loss_reset_frames', 5))
+        self.frames_since_detected = 0
 
         self.bridge = CvBridge()
-        self.depth_image = None
 
-        oe_status = f"One Euro ON (min_cutoff={oe_min_cutoff}, beta={oe_beta})" if self.use_one_euro else "One Euro OFF (EMA active)"
-        rospy.loginfo(f"Finger Analysis Node: Ready — straightness filter: {oe_status}")
+        rospy.loginfo(f"Finger Analysis Node: Ready — One Euro (min_cutoff={oe_min_cutoff}, beta={oe_beta})")
 
     def depth_callback(self, msg):
-        """Store depth frame"""
+        """Buffer depth frame so hand_callback can pair it by timestamp."""
         try:
-            self.depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono16')
+            img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono16')
+            self.depth_buffer.append((msg.header.stamp.to_sec(), img))
         except Exception as e:
             rospy.logerr(f"Depth error: {e}")
 
-    def get_3d_point(self, x, y):
+    def _get_depth_for_stamp(self, target_stamp):
+        """Return (depth_image, matched_ts) whose stamp is closest to target_stamp."""
+        if not self.depth_buffer:
+            return None, None
+        target = target_stamp.to_sec()
+        best_img, best_ts, best_diff = None, None, float('inf')
+        for ts, img in self.depth_buffer:
+            diff = abs(ts - target)
+            if diff < best_diff:
+                best_diff, best_img, best_ts = diff, img, ts
+        return best_img, best_ts
+
+    def _reset_filters(self):
+        """Clear filter state after the hand has been lost for a while."""
+        for filters in self.joint_filters.values():
+            for f in filters:
+                f.reset()
+        self.straightness_oe_filter.reset()
+        self.last_valid_raw = None
+        self.last_valid_oe  = None
+        self.is_straight_state = False
+
+    def get_3d_point(self, x, y, depth_image):
         """Convert pixel to 3D using median depth patch for noise reduction."""
-        if self.depth_image is None:
+        if depth_image is None:
             return None
 
-        h, w = self.depth_image.shape[:2]
+        h, w = depth_image.shape[:2]
         x = int(np.clip(x, 0, w-1))
         y = int(np.clip(y, 0, h-1))
 
@@ -161,7 +177,7 @@ class FingerAnalysisNode:
         x_min = max(0, x - half)
         x_max = min(w, x + half + 1)
 
-        patch = self.depth_image[y_min:y_max, x_min:x_max]
+        patch = depth_image[y_min:y_max, x_min:x_max]
         valid = patch[patch > 0]
         if len(valid) == 0:
             return None
@@ -225,16 +241,29 @@ class FingerAnalysisNode:
         return float(np.mean(dots))
 
     def hand_callback(self, msg):
-        """Process hand — back-project to 3D, filter origin and direction separately"""
-        if not msg.detected or self.depth_image is None:
+        """Process hand — pair with stamp-matched depth, filter joints, derive direction"""
+        # Hand-loss handling — reset filter state after a sustained gap
+        if not msg.detected:
+            self.frames_since_detected += 1
+            if self.frames_since_detected == self.hand_loss_reset_frames:
+                rospy.loginfo("Hand lost — resetting filters")
+                self._reset_filters()
+            return
+        self.frames_since_detected = 0
+
+        depth_image, matched_ts = self._get_depth_for_stamp(msg.header.stamp)
+        if depth_image is None:
+            rospy.logwarn_throttle(1.0, "[FA] No depth frame in buffer — skipping frame")
             return
         if len(msg.keypoints_2d) < 9:
             return
 
-        h, w = self.depth_image.shape[:2]
+        h, w = depth_image.shape[:2]
         stamp_sec = msg.header.stamp.to_sec()
+        depth_age_ms = abs(matched_ts - stamp_sec) * 1000.0
+        rospy.loginfo_throttle(0.5, f"[FA] depth_age={depth_age_ms:.0f}ms  buf={len(self.depth_buffer)}")
 
-        # Back-project raw 2D landmarks to 3D (with depth patch median)
+        # Back-project each finger joint using the depth frame matched to this hand message
         raw_3d = {}
         finger_2d = {}
         for idx in self.FINGER_INDICES:
@@ -242,7 +271,25 @@ class FingerAnalysisNode:
             px = int(pt.x * w)
             py = int(pt.y * h)
             finger_2d[idx] = (pt.x, pt.y)
-            raw_3d[idx] = self.get_3d_point(px, py)
+            raw_3d[idx] = self.get_3d_point(px, py, depth_image)
+
+        valid_joints = [idx for idx in self.FINGER_INDICES if raw_3d[idx] is not None]
+        rospy.loginfo_throttle(0.5, f"[FA] valid_3d={valid_joints}  ({len(valid_joints)}/4 joints have depth)")
+
+        # Filter each joint's 3D position independently — direction is derived
+        # from the filtered joints (no separate per-axis direction filter, which
+        # would break the unit-vector assumption on S²).
+        filt_3d = {}
+        for idx in self.FINGER_INDICES:
+            if raw_3d[idx] is None:
+                filt_3d[idx] = None
+                continue
+            f = self.joint_filters[idx]
+            filt_3d[idx] = np.array([
+                f[0](raw_3d[idx][0], stamp_sec),
+                f[1](raw_3d[idx][1], stamp_sec),
+                f[2](raw_3d[idx][2], stamp_sec),
+            ])
 
         finger_msg = FingerAnalysis()
         finger_msg.header.stamp = msg.header.stamp
@@ -257,70 +304,43 @@ class FingerAnalysisNode:
         tip_2d.x, tip_2d.y = finger_2d[8]
         finger_msg.tip_2d = tip_2d
 
-        # Knuckle depth is required for a usable ray origin
-        if raw_3d[5] is None:
+        # Ray origin = filtered MCP (joint 5). Required.
+        if filt_3d[5] is None:
             return
+        finger_msg.knuckle_3d.x = filt_3d[5][0]
+        finger_msg.knuckle_3d.y = filt_3d[5][1]
+        finger_msg.knuckle_3d.z = filt_3d[5][2]
 
-        kf = self.knuckle_filters
-        knuckle_filt = np.array([
-            kf[0](raw_3d[5][0], stamp_sec),
-            kf[1](raw_3d[5][1], stamp_sec),
-            kf[2](raw_3d[5][2], stamp_sec),
-        ])
-        finger_msg.knuckle_3d.x = knuckle_filt[0]
-        finger_msg.knuckle_3d.y = knuckle_filt[1]
-        finger_msg.knuckle_3d.z = knuckle_filt[2]
+        if filt_3d[8] is not None:
+            finger_msg.tip_3d.x = filt_3d[8][0]
+            finger_msg.tip_3d.y = filt_3d[8][1]
+            finger_msg.tip_3d.z = filt_3d[8][2]
 
-        if raw_3d[8] is not None:
-            finger_msg.tip_3d.x = raw_3d[8][0]
-            finger_msg.tip_3d.y = raw_3d[8][1]
-            finger_msg.tip_3d.z = raw_3d[8][2]
-
-        # Fit direction through all 4 joints (robust to noisy tip depth)
+        # Direction from the filtered joints — no further smoothing on the unit vector
         direction = self.fit_finger_direction(
-            [raw_3d[5], raw_3d[6], raw_3d[7], raw_3d[8]])
+            [filt_3d[5], filt_3d[6], filt_3d[7], filt_3d[8]])
         if direction is not None:
-            # Filter each component of the unit direction vector
-            df = self.direction_filters
-            filt_dir = np.array([
-                df[0](direction[0], stamp_sec),
-                df[1](direction[1], stamp_sec),
-                df[2](direction[2], stamp_sec),
-            ])
-            # Re-normalize after filtering
-            filt_norm = np.linalg.norm(filt_dir)
-            if filt_norm > 1e-6:
-                filt_dir = filt_dir / filt_norm
-            finger_msg.direction_3d.x = filt_dir[0]
-            finger_msg.direction_3d.y = filt_dir[1]
-            finger_msg.direction_3d.z = filt_dir[2]
+            finger_msg.direction_3d.x = direction[0]
+            finger_msg.direction_3d.y = direction[1]
+            finger_msg.direction_3d.z = direction[2]
+            rospy.loginfo_throttle(0.5, f"[FA] dir={direction.round(3).tolist()}  knuckle_z={filt_3d[5][2]:.3f}m")
+        else:
+            rospy.logwarn_throttle(0.5, "[FA] direction=None — too few valid depth joints for SVD")
 
+        # Straightness computed on RAW joints so the filter gates on real noise
         raw = self.calculate_straightness(raw_3d[5], raw_3d[6], raw_3d[7], raw_3d[8])
 
-        # Publish raw score for diagnostics (before any smoothing)
+        # Publish raw score for diagnostics (before smoothing)
         if raw is not None:
             self.raw_pub.publish(Float32(data=raw))
 
-        # # EMA computation commented out — One Euro filter is the active smoother
-        # if raw is not None:
-        #     self.raw_history.append(raw)
-        #     filtered = float(np.median(self.raw_history))
-        #     if self.straightness_ema is None:
-        #         self.straightness_ema = filtered
-        #     else:
-        #         a = self.straightness_ema_alpha
-        #         self.straightness_ema = a * filtered + (1 - a) * self.straightness_ema
-
-        # One Euro Filter on raw straightness (computed every frame regardless of gate,
-        # so the filter state stays warm and the value is always available in the message)
+        # One Euro Filter — always active
         oe_val = self.straightness_oe_filter(raw, stamp_sec) if raw is not None else None
 
-        # Update hold-last trackers
         if raw    is not None: self.last_valid_raw = raw
         if oe_val is not None: self.last_valid_oe  = oe_val
 
         # Hysteresis: activate at on_threshold, deactivate at off_threshold
-        # Driven by One Euro filter
         if oe_val is not None:
             if self.is_straight_state:
                 if oe_val < self.straight_off_threshold:
@@ -329,29 +349,12 @@ class FingerAnalysisNode:
                 if oe_val > self.straight_on_threshold:
                     self.is_straight_state = True
 
-        # Populate all three filter outputs — use last valid value when depth fails
-        finger_msg.straightness_raw       = self.last_valid_raw if self.last_valid_raw is not None else 0.0
-        finger_msg.straightness_ema       = self.straightness_ema if self.straightness_ema is not None else 0.0
-        finger_msg.straightness_one_euro  = self.last_valid_oe  if self.last_valid_oe  is not None else 0.0
-
-        # Active output: One Euro when enabled, EMA otherwise
-        if self.use_one_euro and oe_val is not None:
-            finger_msg.straightness_score = oe_val
-        else:
-            finger_msg.straightness_score = finger_msg.straightness_ema
+        finger_msg.straightness_raw      = self.last_valid_raw if self.last_valid_raw is not None else 0.0
+        finger_msg.straightness_one_euro = self.last_valid_oe  if self.last_valid_oe  is not None else 0.0
+        finger_msg.straightness_score    = finger_msg.straightness_one_euro
 
         finger_msg.is_straight = self.is_straight_state
         finger_msg.confidence = msg.confidences[8] if len(msg.confidences) > 8 else 0.0
-
-        # # Verbose comparison print commented out
-        # raw_s = f"{raw:.3f}" if raw is not None else "None"
-        # rospy.loginfo(
-        #     f"Straightness  raw={raw_s}"
-        #     f"  ema={finger_msg.straightness_ema:.3f}"
-        #     f"  oe={finger_msg.straightness_one_euro:.3f}"
-        #     f"  score={finger_msg.straightness_score:.3f}"
-        #     f"  straight={self.is_straight_state}"
-        # )
 
         self.finger_pub.publish(finger_msg)
 

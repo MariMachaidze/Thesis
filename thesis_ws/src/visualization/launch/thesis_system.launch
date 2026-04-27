@@ -16,10 +16,10 @@
     <param name="paper_y_m" value="0.600"/>
     <param name="fx" value="901.473"/>
     <param name="fy" value="899.637"/>
-    <param name="cx" value="637.649"/>
+    <param name="cx" value="642.351"/>
     <param name="cy" value="349.990"/>
   </node>
-  
+
   <!-- Hand Detection -->
   <node pkg="hand_detection" type="hand_detection_node.py" name="hand_detection" output="screen">
     <param name="detection_confidence" value="0.7"/>
@@ -31,14 +31,13 @@
     <param name="straightness_threshold" value="0.7"/>
     <param name="fx" value="901.473"/>
     <param name="fy" value="899.637"/>
-    <param name="cx" value="637.649"/>
+    <param name="cx" value="642.351"/>
     <param name="cy" value="349.990"/>
     <!-- One Euro Filter for landmark smoothing (knuckle + direction) -->
     <param name="filter_min_cutoff" value="1.0"/>
     <param name="filter_beta" value="0.007"/>
     <param name="filter_d_cutoff" value="1.0"/>
-    <!-- One Euro Filter for straightness score (set use_one_euro=true to activate) -->
-    <param name="use_one_euro"        value="true"/>
+    <!-- One Euro Filter for straightness score -->
     <param name="one_euro_min_cutoff" value="1.0"/>
     <param name="one_euro_beta"       value="0.007"/>
     <param name="one_euro_d_cutoff"   value="1.0"/>
@@ -46,8 +45,8 @@
   
   <!-- Pointing Localization -->
   <node pkg="pointing_localization" type="pointing_localization_node.py" name="pointing_localization" output="screen">
-    <param name="filter_min_cutoff" value="1.0"/>
-    <param name="filter_beta" value="0.007"/>
+    <param name="filter_min_cutoff" value="0.1"/>
+    <param name="filter_beta" value="0.8"/>
     <param name="filter_d_cutoff" value="1.0"/>
     <!-- Diagnostic: set true to print ray/intersection/uv every 0.5 s and publish /diag/pointing_raw -->
     <param name="diagnose_pointing" value="true"/>
@@ -63,23 +62,29 @@
     <param name="diagnose_pointing" value="true"/>
     <param name="fx" value="901.473"/>
     <param name="fy" value="899.637"/>
-    <param name="cx" value="637.649"/>
+    <param name="cx" value="642.351"/>
     <param name="cy" value="349.990"/>
   </node>
 
+  <!-- Sphero Detection (camera-based position tracking) -->
+  <node pkg="sphero_detection" type="sphero_detection_node.py" name="sphero_detection" output="screen"/>
+
   <!-- Sphero Pointing Controller -->
   <node pkg="sphero_pointing" type="sphero_pointing_node.py" name="sphero_pointing" output="screen">
-    <param name="arrival_threshold" value="0.04"/>
-    <param name="max_speed" value="80"/>
-    <param name="min_speed" value="20"/>
-    <param name="speed_kp" value="200"/>
-    <param name="target_hold_time" value="0.5"/>
-    <param name="fx" value="901.473"/>
-    <param name="fy" value="899.637"/>
-    <param name="cx" value="637.649"/>
-    <param name="cy" value="349.990"/>
-    <!-- <param name="sphero_name" value="SB-FD03"/> -->
-    <!-- <param name="heading_offset" value="0.0"/> -->
+    <!-- Motion: speed 0-255. Camera feedback handles distance so cm_per_sec is not critical. -->
+    <param name="roll_speed"           value="80"/>
+    <param name="cm_per_sec"           value="18.18"/>
+    <param name="arrival_threshold_cm" value="3.0"/>
+    <!-- Each roll step lasts exactly max_step_s regardless of distance.
+         Camera checks after each step and corrects. Tune: if Sphero still barely
+         moves, raise roll_speed. If it overshoots wildly, lower max_step_s. -->
+    <param name="max_step_s"           value="1.0"/>
+    <param name="step_pause_s"         value="0.4"/>
+    <!-- Paper size — must match camera_calibration paper_x_m / paper_y_m (in cm) -->
+    <param name="paper_x_cm"          value="85.0"/>
+    <param name="paper_y_cm"          value="60.0"/>
+    <param name="target_hold_time"    value="0.5"/>
+    <!-- <param name="sphero_name"      value="SB-FD03"/> -->
   </node>
 
 </launch>

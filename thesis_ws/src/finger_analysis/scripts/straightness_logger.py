@@ -41,7 +41,6 @@ class StraightnessLogger:
         self.rows.append({
             'time_s':      round(t - self.t0, 4),
             'raw':         round(msg.straightness_raw, 6),
-            'ema':         round(msg.straightness_ema, 6),
             'one_euro':    round(msg.straightness_one_euro, 6),
             'is_straight': int(msg.is_straight),
         })

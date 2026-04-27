@@ -44,10 +44,12 @@ class VisualizationNode:
         self.show_landmarks    = rospy.get_param('~show_landmarks',    True)
         self.diagnose_hand     = rospy.get_param('~diagnose_hand',     False)
         self.diagnose_pointing = rospy.get_param('~diagnose_pointing', False)
-        self.fx = rospy.get_param('~fx', 640.0)
-        self.fy = rospy.get_param('~fy', 640.0)
-        self.cx = rospy.get_param('~cx', 640.0)
-        self.cy = rospy.get_param('~cy', 360.0)
+        # Flip top-down views vertically so the edge closer to the user is at the bottom
+        self.flip_view         = rospy.get_param('~flip_view',         True)
+        self.fx = rospy.get_param('~fx', 901.473)
+        self.fy = rospy.get_param('~fy', 899.637)
+        self.cx = rospy.get_param('~cx', 642.351)
+        self.cy = rospy.get_param('~cy', 349.990)
 
         self.bridge = CvBridge()
 
@@ -103,6 +105,20 @@ class VisualizationNode:
         u = int(self.fx * X / Z + self.cx)
         v = int(self.fy * Y / Z + self.cy)
         return u, v
+
+    def _vx(self, u_norm):
+        """Normalized u → pixel x in vertically-flipped display."""
+        return int(u_norm * self.WARP_W)
+
+    def _vy(self, v_norm):
+        """Normalized v → pixel y in display (v=0=near=bottom, v=1=far=top)."""
+        return int((1.0 - v_norm) * self.WARP_H)
+
+    def _flip_pts(self, pts):
+        """Flip a list of (x, y) pixel coords vertically in the warp view."""
+        if not self.flip_view:
+            return pts
+        return [(x, self.WARP_H - y) for x, y in pts]
 
     # ================================================================
     #  Perspective warp
@@ -189,8 +205,10 @@ class VisualizationNode:
             if (self.finger_data and self.finger_data.is_straight
                     and self.target_data is not None and self.target_data.is_valid
                     and self._warp_M_inv is not None):
-                src   = np.array([[[self.target_data.u_normalized * self.WARP_W,
-                                    self.target_data.v_normalized * self.WARP_H]]], dtype=np.float32)
+                _tu = float(np.clip(self.target_data.u_normalized, 0.0, 1.0))
+                _tv = float(np.clip(self.target_data.v_normalized, 0.0, 1.0))
+                src   = np.array([[[ _tu * self.WARP_W,
+                                     _tv * self.WARP_H]]], dtype=np.float32)
                 dst   = cv2.perspectiveTransform(src, self._warp_M_inv)
                 tx, ty = int(dst[0, 0, 0]), int(dst[0, 0, 1])
                 tip = pts[8]
@@ -230,7 +248,7 @@ class VisualizationNode:
                 (0,17),(17,18),(18,19),(19,20),
             ]
             kp  = self.hand_data.keypoints_2d
-            pts = self._transform_pts([(p.x, p.y) for p in kp], frame_shape, M)
+            pts = self._flip_pts(self._transform_pts([(p.x, p.y) for p in kp], frame_shape, M))
 
             for s, e in connections:
                 cv2.line(warped, pts[s], pts[e], (180, 180, 180), 1)
@@ -241,18 +259,20 @@ class VisualizationNode:
 
         if (self.finger_data and self.finger_data.is_straight
                 and self.diag_pointing_raw is not None):
-            tx = int(self.diag_pointing_raw.x * W)
-            ty = int(self.diag_pointing_raw.y * H)
+            tx = self._vx(float(np.clip(self.diag_pointing_raw.x, 0.0, 1.0)))
+            ty = self._vy(float(np.clip(self.diag_pointing_raw.y, 0.0, 1.0)))
             if self.hand_data and len(self.hand_data.keypoints_2d) >= 9:
                 tip   = self.hand_data.keypoints_2d[8]
-                tip_w = self._transform_pts([(tip.x, tip.y)], frame_shape, M)[0]
+                tip_w = self._flip_pts(self._transform_pts([(tip.x, tip.y)], frame_shape, M))[0]
                 cv2.line(warped, tip_w, (tx, ty), (0, 200, 255), 2)
             cv2.circle(warped, (tx, ty), 10, (0, 0, 200), -1)
             cv2.circle(warped, (tx, ty), 12, (255, 255, 255), 2)
 
         if self.target_data and self.target_data.is_valid:
-            tx  = int(self.target_data.u_normalized * W)
-            ty  = int(self.target_data.v_normalized * H)
+            _u  = float(np.clip(self.target_data.u_normalized, 0.0, 1.0))
+            _v  = float(np.clip(self.target_data.v_normalized, 0.0, 1.0))
+            tx  = self._vx(_u)
+            ty  = self._vy(_v)
             arm = 18
             cv2.line(warped,   (tx - arm, ty), (tx + arm, ty), (0, 255, 0), 2)
             cv2.line(warped,   (tx, ty - arm), (tx, ty + arm), (0, 255, 0), 2)
@@ -281,9 +301,17 @@ class VisualizationNode:
     def draw_topdown_view(self, warped):
         W, H = self.WARP_W, self.WARP_H
 
+        # Grid: 10 cm spacing (1 px = 1 mm → 100 px = 10 cm)
+        for x in range(0, W + 1, 100):
+            cv2.line(warped, (x, 0), (x, H), (70, 70, 70), 1)
+        for y in range(0, H + 1, 100):
+            cv2.line(warped, (0, y), (W, y), (70, 70, 70), 1)
+
         if self.target_data and self.target_data.is_valid:
-            tx  = int(self.target_data.u_normalized * W)
-            ty  = int(self.target_data.v_normalized * H)
+            _u  = float(np.clip(self.target_data.u_normalized, 0.0, 1.0))
+            _v  = float(np.clip(self.target_data.v_normalized, 0.0, 1.0))
+            tx  = self._vx(_u)
+            ty  = self._vy(_v)
             arm = 20
             cv2.line(warped,   (tx - arm, ty), (tx + arm, ty), (0, 255, 0), 2)
             cv2.line(warped,   (tx, ty - arm), (tx, ty + arm), (0, 255, 0), 2)
@@ -316,6 +344,8 @@ class VisualizationNode:
             if self.calib_data is not None and self.calib_data.is_calibrated:
                 warped = self._warp_frame(frame, self.calib_data)
                 if warped is not None:
+                    if self.flip_view:
+                        warped = cv2.flip(warped, 0)
                     topdown_view = warped.copy()
                     self.draw_topdown_view(topdown_view)
                     cv2.imshow('Top-Down View', topdown_view)

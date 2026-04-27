@@ -51,10 +51,10 @@ class CalibrationVerifier:
 
         # Camera intrinsics — must match camera_calibration_node exactly.
         # Defaults mirror thesis_system.launch (D435i spec).
-        self.fx = float(rospy.get_param('~fx', 901.47))
-        self.fy = float(rospy.get_param('~fy', 899.64))
-        self.cx = float(rospy.get_param('~cx', 640.0))
-        self.cy = float(rospy.get_param('~cy', 360.0))
+        self.fx = float(rospy.get_param('~fx', 901.473))
+        self.fy = float(rospy.get_param('~fy', 899.637))
+        self.cx = float(rospy.get_param('~cx', 642.351))
+        self.cy = float(rospy.get_param('~cy', 349.990))
 
         rospy.Subscriber('/camera/calibration', CalibrationData,
                          self._calib_callback, queue_size=1)
@@ -83,8 +83,8 @@ class CalibrationVerifier:
         p1     = self._v(msg.plane_center)
         x_axis = self._v(msg.paper_x_axis)
         y_axis = self._v(msg.paper_y_axis)
-        long_m  = msg.paper_x_m / 2   # long edge  (TL → TR, x_axis direction)
-        short_m = msg.paper_y_m / 2  # short edge (TL → BL, y_axis direction)
+        long_m  = msg.paper_x_m   # long edge  (TL → TR, x_axis direction)
+        short_m = msg.paper_y_m   # short edge (TL → BL, y_axis direction)
         return [p1,
                 p1 + x_axis * long_m,
                 p1 + y_axis * short_m,
