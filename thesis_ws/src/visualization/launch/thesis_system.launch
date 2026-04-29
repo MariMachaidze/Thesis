@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <launch>
+  <!-- Pass recalibrate:=true to redo paper corner clicks -->
+  <arg name="recalibrate" default="false"/>
   
   <!-- D435i Camera Driver -->
   <node pkg="d435i_camera" type="d435i_driver_node.py" name="d435i_driver" output="screen">
@@ -12,12 +14,13 @@
   
   <!-- Camera Calibration (manual) -->
   <node pkg="camera_calibration" type="camera_calibration_node.py" name="camera_calibration" output="screen">
-    <param name="paper_x_m" value="0.850"/>
-    <param name="paper_y_m" value="0.600"/>
-    <param name="fx" value="901.473"/>
-    <param name="fy" value="899.637"/>
-    <param name="cx" value="642.351"/>
-    <param name="cy" value="349.990"/>
+    <param name="paper_x_m"   value="0.850"/>
+    <param name="paper_y_m"   value="0.600"/>
+    <param name="fx"          value="901.473"/>
+    <param name="fy"          value="899.637"/>
+    <param name="cx"          value="642.351"/>
+    <param name="cy"          value="349.990"/>
+    <param name="recalibrate" value="$(arg recalibrate)"/>
   </node>
 
   <!-- Hand Detection -->
@@ -69,22 +72,28 @@
   <!-- Sphero Detection (camera-based position tracking) -->
   <node pkg="sphero_detection" type="sphero_detection_node.py" name="sphero_detection" output="screen"/>
 
-  <!-- Sphero Pointing Controller -->
+  <!-- Sphero Navigate Controller -->
+  <node pkg="sphero_pointing" type="sphero_navigate_node.py" name="sphero_navigate" output="screen" launch-prefix="bash -c 'sleep 3; exec $0 $@' ">
+    <param name="sphero_name"     value="SB-FD03"/>
+    <param name="heading_offset"  value="0.0"/>
+    <param name="fx"              value="901.473"/>
+    <param name="fy"              value="899.637"/>
+    <param name="cx"              value="642.351"/>
+    <param name="cy"              value="349.990"/>
+  </node>
+
+  <!-- Sphero Pointing Controller (disabled — use sphero_navigate_node instead) -->
+  <!--
   <node pkg="sphero_pointing" type="sphero_pointing_node.py" name="sphero_pointing" output="screen">
-    <!-- Motion: speed 0-255. Camera feedback handles distance so cm_per_sec is not critical. -->
     <param name="roll_speed"           value="80"/>
     <param name="cm_per_sec"           value="18.18"/>
     <param name="arrival_threshold_cm" value="3.0"/>
-    <!-- Each roll step lasts exactly max_step_s regardless of distance.
-         Camera checks after each step and corrects. Tune: if Sphero still barely
-         moves, raise roll_speed. If it overshoots wildly, lower max_step_s. -->
     <param name="max_step_s"           value="1.0"/>
     <param name="step_pause_s"         value="0.4"/>
-    <!-- Paper size — must match camera_calibration paper_x_m / paper_y_m (in cm) -->
     <param name="paper_x_cm"          value="85.0"/>
     <param name="paper_y_cm"          value="60.0"/>
     <param name="target_hold_time"    value="0.5"/>
-    <!-- <param name="sphero_name"      value="SB-FD03"/> -->
   </node>
+  -->
 
 </launch>

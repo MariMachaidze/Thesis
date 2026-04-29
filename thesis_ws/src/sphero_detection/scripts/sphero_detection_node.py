@@ -193,17 +193,17 @@ class SpheroDetectionNode:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def spin(self):
-        WIN    = "Sphero Detection  [Q=quit]"
-        WIN_TB = "Hough Controls"
+        # WIN    = "Sphero Detection  [Q=quit]"
+        # WIN_TB = "Hough Controls"
 
-        cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WIN, RECT_W, RECT_H)
-        cv2.namedWindow(WIN_TB, cv2.WINDOW_NORMAL)
+        # cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+        # cv2.resizeWindow(WIN, RECT_W, RECT_H)
+        # cv2.namedWindow(WIN_TB, cv2.WINDOW_NORMAL)
 
-        cv2.createTrackbar("Sensitivity (p2)\nlower=more", WIN_TB, DEF_PARAM2, 80,  _nothing)
-        cv2.createTrackbar("Min radius (px)",              WIN_TB, DEF_MIN_R,  100, _nothing)
-        cv2.createTrackbar("Max radius (px)",              WIN_TB, DEF_MAX_R,  200, _nothing)
-        cv2.createTrackbar("Blur kernel (px)",             WIN_TB, DEF_BLUR,   15,  _nothing)
+        # cv2.createTrackbar("Sensitivity (p2)\nlower=more", WIN_TB, DEF_PARAM2, 80,  _nothing)
+        # cv2.createTrackbar("Min radius (px)",              WIN_TB, DEF_MIN_R,  100, _nothing)
+        # cv2.createTrackbar("Max radius (px)",              WIN_TB, DEF_MAX_R,  200, _nothing)
+        # cv2.createTrackbar("Blur kernel (px)",             WIN_TB, DEF_BLUR,   15,  _nothing)
 
         rate = rospy.Rate(30)
 
@@ -213,18 +213,18 @@ class SpheroDetectionNode:
                 H_rect = self.H_rect
 
             if frame is None or H_rect is None:
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                # if cv2.waitKey(1) & 0xFF == ord('q'):
+                #     break
                 rate.sleep()
                 continue
 
-            p2     = cv2.getTrackbarPos("Sensitivity (p2)\nlower=more", WIN_TB)
-            min_r  = cv2.getTrackbarPos("Min radius (px)",              WIN_TB)
-            max_r  = cv2.getTrackbarPos("Max radius (px)",              WIN_TB)
-            blur_k = cv2.getTrackbarPos("Blur kernel (px)",             WIN_TB)
+            # p2     = cv2.getTrackbarPos("Sensitivity (p2)\nlower=more", WIN_TB)
+            # min_r  = cv2.getTrackbarPos("Min radius (px)",              WIN_TB)
+            # max_r  = cv2.getTrackbarPos("Max radius (px)",              WIN_TB)
+            # blur_k = cv2.getTrackbarPos("Blur kernel (px)",             WIN_TB)
 
             rectified  = cv2.warpPerspective(frame, H_rect, (RECT_W, RECT_H))
-            candidates = self._detect(rectified, p2, min_r, max_r, blur_k)
+            candidates = self._detect(rectified, DEF_PARAM2, DEF_MIN_R, DEF_MAX_R, DEF_BLUR)
             detected   = self._pick_best(candidates)
 
             u_out = v_out = None
@@ -241,7 +241,7 @@ class SpheroDetectionNode:
                 v_out = self._filt_v(v_raw)
 
                 self.det_pub.publish(Point(x=u_out, y=v_out, z=float(r)))
-                rospy.loginfo_throttle(0.5, "Sphero u=%.3f v=%.3f r=%dpx", u_out, v_out, r)
+                # rospy.loginfo_throttle(0.5, "Sphero u=%.3f v=%.3f r=%dpx", u_out, v_out, r)
             else:
                 self.lost_count += 1
                 if self.lost_count > MAX_LOST:
@@ -249,44 +249,32 @@ class SpheroDetectionNode:
                     if self.trail:
                         self.trail.popleft()
 
-            # ── Display — vertical flip so far side appears at top ────────────────
-            # Detection and publishing use original rectified coords.
-            disp = cv2.flip(rectified, 0)
+            # ── Display (commented out — navigate node shows its own window) ──────
+            # disp = cv2.flip(rectified, 0)
+            # def f(cx, cy):
+            #     return (cx, RECT_H - 1 - cy)
+            # trail_pts = list(self.trail)
+            # for i in range(1, len(trail_pts)):
+            #     a   = i / len(trail_pts)
+            #     col = (int(50*a), int(200*a), int(255*(1-a) + 80*a))
+            #     cv2.line(disp, f(*trail_pts[i-1]), f(*trail_pts[i]), col, max(1, int(3*a)))
+            # for cx_c, cy_c, r_c in candidates:
+            #     cv2.circle(disp, f(cx_c, cy_c), r_c, (80, 80, 80), 1)
+            # if detected is not None:
+            #     cx, cy, r = detected
+            #     dx, dy = f(cx, cy)
+            #     cv2.circle(disp, (dx, dy), max(r, 4), (0, 255, 255), 2)
+            #     cv2.circle(disp, (dx, dy), 4, (0, 0, 255), -1)
+            #     cv2.putText(disp, f"u={u_out:.3f}  v={v_out:.3f}  r={r}px",
+            #                 (dx + r + 4, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
+            # else:
+            #     cv2.putText(disp, f"searching...  (lost {self.lost_count}f)",
+            #                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,100,255), 2)
+            # cv2.imshow(WIN, disp)
+            # if cv2.waitKey(1) & 0xFF == ord('q'):
+            #     break
 
-            def f(cx, cy):   # rectified → display coords after vertical flip
-                return (cx, RECT_H - 1 - cy)
-
-            trail_pts = list(self.trail)
-            for i in range(1, len(trail_pts)):
-                a   = i / len(trail_pts)
-                col = (int(50*a), int(200*a), int(255*(1-a) + 80*a))
-                cv2.line(disp, f(*trail_pts[i-1]), f(*trail_pts[i]), col, max(1, int(3*a)))
-
-            for cx_c, cy_c, r_c in candidates:
-                cv2.circle(disp, f(cx_c, cy_c), r_c, (80, 80, 80), 1)
-
-            if detected is not None:
-                cx, cy, r = detected
-                dx, dy = f(cx, cy)
-                cv2.circle(disp, (dx, dy), max(r, 4), (0, 255, 255), 2)
-                cv2.circle(disp, (dx, dy), 4, (0, 0, 255), -1)
-                cv2.putText(disp, f"u={u_out:.3f}  v={v_out:.3f}  r={r}px",
-                            (dx + r + 4, dy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
-            else:
-                cv2.putText(disp, f"searching...  (lost {self.lost_count}f)",
-                            (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2, cv2.LINE_AA)
-
-            cv2.putText(disp,
-                        f"p2={p2}  r={min_r}-{max_r}px  blur={max(3,blur_k|1)}  |  Q=quit",
-                        (6, RECT_H - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
-            cv2.imshow(WIN, disp)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
             rate.sleep()
-
-        cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
