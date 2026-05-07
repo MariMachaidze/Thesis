@@ -45,29 +45,28 @@ from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-SPEED           = 50
-UPDATE_INTERVAL = 0.12  # s between heading updates (tuned for Bluetooth reliability)
-SLOW_DIST_CM    = 25.0  # cm — start reducing speed within this radius of final waypoint
-MIN_SPEED       = 25    # floor speed (keeps robot moving even at path end)
-INITIAL_BOOST_DUR = 0.5  # seconds: run at full speed 50 to overcome static friction
-COAST_FACTOR    = 0.28  # empirical: coast_cm ≈ COAST_FACTOR × speed
-HDG_CHANGE_THRESH = 3   # degrees: only send roll() if heading changed by this much
-SPEED_CHANGE_THRESH = 2 # speed units: only send roll() if speed changed by this much
+SPEED               = 50
+UPDATE_INTERVAL     = 0.12   # s between heading updates (tuned for Bluetooth reliability)
+MIN_SPEED           = 25     # floor speed (keeps robot moving even at path end)
+HDG_CHANGE_THRESH   = 3      # degrees: only send roll() if heading changed by this much
+SPEED_CHANGE_THRESH = 2      # speed units: only send roll() if speed changed by this much
 
-# Curvature-aware control
-SHARP_TURN_THRESHOLD = 25  # degrees: turn sharper than this reduces speed
-STRAIGHT_SPEED = 50        # full speed on straight segments
-TURN_SPEED = 15            # reduced speed on sharp turns
+# Curvature-aware control (predictive)
+SHARP_TURN_THRESHOLD    = 25   # degrees: turn sharper than this reduces speed
+CURVATURE_LOOKAHEAD_PTS = 15   # path points ahead to estimate upcoming curvature
+
+# Adaptive lookahead
+LOOKAHEAD_MIN_CM = 4.0   # minimum lookahead (sharp turns)
+LOOKAHEAD_MAX_CM = 10.0  # maximum lookahead (straight segments)
 
 # Stuck detection (path-progress-based, immune to distance noise)
-STUCK_CYCLES = 20              # cycles window (~2.4s at 0.12s interval)
-STUCK_MIN_PROGRESS = 2         # minimum path_idx points that must advance in that window
+STUCK_CYCLES       = 20   # cycles window (~2.4s at 0.12s interval)
+STUCK_MIN_PROGRESS = 2    # minimum path_idx points that must advance in that window
 
 # Waypoint navigation
-WAYPOINT_TOLERANCE_CM = 3.0   # advance to next waypoint within this radius
-LOOKAHEAD_CM          = 7.0   # blend toward next waypoint this many cm ahead
-SEARCH_WINDOW         = 20    # limit nearest-point search to local window (prevent snap-ahead)
-ARRIVAL_DIST_CM       = 4.0   # robot must be within this distance of final waypoint to arrive
+SEARCH_WINDOW    = 40    # local search window (10% of 400-point path)
+ARRIVAL_DIST_CM  = 4.0   # robot must be within this distance of final waypoint to arrive
+FINAL_APPROACH_CM = 8.0  # decelerate smoothly within this distance of goal
 PAPER_X_CM      = 85.0
 PAPER_Y_CM      = 60.0
 RECT_W          = 850
@@ -215,7 +214,7 @@ def _pick_best(candidates, last_px):
 
 
 # ── Path Interpolation ────────────────────────────────────────────────────────
-def interpolate_smooth_path(waypoints, num_points=200):
+def interpolate_smooth_path(waypoints, num_points=400):
     """
     Interpolate waypoints to a smooth path using PCHIP (Piecewise Cubic Hermite Interpolating Polynomial).
     PCHIP preserves monotonicity and avoids overshoot, making it safer than CubicSpline for sharp-corner paths.
@@ -276,7 +275,7 @@ def find_closest_path_point(pos, path, search_start_idx=0):
     return path[min_idx], min_idx, min_dist
 
 
-def get_lookahead_point(pos, path, current_idx, lookahead_cm=LOOKAHEAD_CM):
+def get_lookahead_point(pos, path, current_idx, lookahead_cm):
     """
     Get point on path that is lookahead_cm ahead of robot's current position.
     Uses pure pursuit logic.
@@ -284,15 +283,60 @@ def get_lookahead_point(pos, path, current_idx, lookahead_cm=LOOKAHEAD_CM):
     if not path or current_idx >= len(path):
         return path[-1] if path else pos
 
-    # Start searching from current position forward
     for i in range(current_idx, len(path)):
         px, pv = path[i]
         dist = math.hypot((px - pos[0]) * PAPER_X_CM, (pv - pos[1]) * PAPER_Y_CM)
         if dist >= lookahead_cm:
             return (px, pv)
 
-    # If we didn't find a point far enough ahead, return the end
     return path[-1]
+
+
+def estimate_upcoming_curvature(path, path_idx):
+    """
+    Estimate curvature CURVATURE_LOOKAHEAD_PTS ahead along the path.
+    Returns heading change in degrees — larger means sharper upcoming turn.
+    """
+    n = len(path)
+    pts = CURVATURE_LOOKAHEAD_PTS
+    if path_idx + pts >= n:
+        return 0.0
+
+    p0 = path[path_idx]
+    p1 = path[path_idx + pts // 2]
+    p2 = path[path_idx + pts]
+
+    du1 = (p1[0] - p0[0]) * PAPER_X_CM
+    dv1 = (p1[1] - p0[1]) * PAPER_Y_CM
+    du2 = (p2[0] - p1[0]) * PAPER_X_CM
+    dv2 = (p2[1] - p1[1]) * PAPER_Y_CM
+
+    if math.hypot(du1, dv1) < 1e-6 or math.hypot(du2, dv2) < 1e-6:
+        return 0.0
+
+    h1 = math.degrees(math.atan2(du1, dv1)) % 360
+    h2 = math.degrees(math.atan2(du2, dv2)) % 360
+
+    diff = abs(h1 - h2)
+    if diff > 180:
+        diff = 360 - diff
+    return diff
+
+
+def compute_adaptive_lookahead(speed, curvature_deg):
+    """
+    Compute adaptive lookahead distance based on current speed and upcoming curvature.
+    - Faster speed → larger lookahead (smoother straights)
+    - Sharper turn ahead → smaller lookahead (tighter corner tracking)
+    """
+    speed_factor = speed / SPEED
+    lookahead = LOOKAHEAD_MIN_CM + speed_factor * (LOOKAHEAD_MAX_CM - LOOKAHEAD_MIN_CM)
+
+    if curvature_deg > SHARP_TURN_THRESHOLD:
+        reduction_ratio = (curvature_deg - SHARP_TURN_THRESHOLD) / 90.0
+        lookahead -= reduction_ratio * (lookahead - LOOKAHEAD_MIN_CM) * 0.6
+
+    return max(LOOKAHEAD_MIN_CM, min(LOOKAHEAD_MAX_CM, lookahead))
 
 
 # ── Calibration / camera ──────────────────────────────────────────────────────
@@ -385,9 +429,6 @@ class Navigator:
         self.trajectory         = []  # actual path followed during navigation
         self._thread            = None
 
-        # Curvature-aware control
-        self.last_lookahead_heading = None
-
         # Stuck detection
         self.idx_history = deque(maxlen=STUCK_CYCLES)
         self.stuck_counter = 0
@@ -410,7 +451,6 @@ class Navigator:
         self.waypoints   = waypoints or []
 
         # Reset tracking variables
-        self.last_lookahead_heading = None
         self.idx_history.clear()
         self.stuck_counter = 0
         self.in_stuck_recovery = False
@@ -474,8 +514,12 @@ class Navigator:
             )
             self.path_idx = max(self.path_idx, new_idx)
 
-            # Get lookahead point for pure pursuit
-            target = get_lookahead_point(pos, self.path, self.path_idx, LOOKAHEAD_CM)
+            # Predictive curvature: estimate upcoming turn before computing lookahead/speed
+            upcoming_curvature = estimate_upcoming_curvature(self.path, self.path_idx)
+
+            # Adaptive lookahead: smaller on sharp turns, larger on straights
+            lookahead_cm = compute_adaptive_lookahead(self.last_speed or SPEED, upcoming_curvature)
+            target = get_lookahead_point(pos, self.path, self.path_idx, lookahead_cm)
 
             # Compute error
             du = target[0] - pos[0]
@@ -517,7 +561,7 @@ class Navigator:
             paper_angle = math.degrees(math.atan2(du, dv)) % 360
             heading = int((paper_angle + self.heading_offset) % 360)
 
-            # Stuck recovery: briefly stop and reset with speed boost
+            # Stuck recovery: briefly stop then boost to full speed
             if self.in_stuck_recovery:
                 recovery_elapsed = time.time() - self.recovery_start_time
                 if recovery_elapsed < 0.3:
@@ -526,28 +570,20 @@ class Navigator:
                 else:
                     self.in_stuck_recovery = False
                     speed = SPEED
-            # Speed scaling: full speed until last 10% of path, then decelerate on physical distance
             else:
                 near_path_end = self.path_idx >= len(self.path) * 0.9
                 if near_path_end:
-                    speed = max(MIN_SPEED, int(SPEED * min(dist_to_end / SLOW_DIST_CM, 1.0)))
+                    # Softer final approach: smooth ramp over last FINAL_APPROACH_CM
+                    approach_factor = min(dist_to_end / FINAL_APPROACH_CM, 1.0)
+                    speed = max(MIN_SPEED, int(SPEED * approach_factor))
                 else:
                     speed = SPEED
 
-                    # Curvature-aware control: reduce speed on sharp turns
-                    if self.last_lookahead_heading is not None:
-                        # Compute turn sharpness
-                        hdg_change = abs(heading - self.last_lookahead_heading)
-                        if hdg_change > 180:
-                            hdg_change = 360 - hdg_change
-
-                        if hdg_change > SHARP_TURN_THRESHOLD:
-                            # Sharp turn: reduce speed linearly based on turn angle
-                            turn_factor = 1.0 - (hdg_change - SHARP_TURN_THRESHOLD) / 90.0
-                            turn_factor = max(0.3, turn_factor)  # floor at 30% speed
-                            speed = max(MIN_SPEED, int(speed * turn_factor))
-
-                self.last_lookahead_heading = heading
+                # Apply predictive curvature reduction in all phases
+                if upcoming_curvature > SHARP_TURN_THRESHOLD:
+                    turn_factor = 1.0 - (upcoming_curvature - SHARP_TURN_THRESHOLD) / 90.0
+                    turn_factor = max(0.3, turn_factor)
+                    speed = max(MIN_SPEED, int(speed * turn_factor))
 
             # Save previous values BEFORE overwriting (for change detection)
             prev_heading = self.last_heading
@@ -563,7 +599,7 @@ class Navigator:
                   f"pos=({pos[0]:.3f},{pos[1]:.3f})  "
                   f"lookahead=({target[0]:.3f},{target[1]:.3f})  "
                   f"dist_to_end={dist_to_end:.1f}cm  hdg={heading}°  speed={speed}  "
-                  f"cte={cross_track_error:.1f}cm")
+                  f"la={lookahead_cm:.1f}cm  curv={upcoming_curvature:.0f}°  cte={cross_track_error:.1f}cm")
 
             # Only send command if heading or speed changed significantly, or if too long since last command
             t_now = time.time()
@@ -768,7 +804,7 @@ def main():
                     draw_overlay(disp, ["Sphero detected.  Click waypoints on the paper (ENTER to start)."])
                 else:
                     # Generate and show smooth path preview
-                    smooth_path[0] = interpolate_smooth_path(waypoints[0], num_points=200)
+                    smooth_path[0] = interpolate_smooth_path(waypoints[0], num_points=400)
                     draw_smooth_path(disp, smooth_path[0], color=(100, 150, 255), thickness=1)
                     # Show all waypoints set so far
                     for i, wp in enumerate(waypoints[0]):
@@ -854,7 +890,7 @@ def main():
                         tracker.clear_history()
                         # Prepend current position to waypoints so path goes: START → WP1 → WP2 → ... → WPN
                         path_waypoints = [fuv_now] + waypoints[0]
-                        smooth_path[0] = interpolate_smooth_path(path_waypoints, num_points=200)
+                        smooth_path[0] = interpolate_smooth_path(path_waypoints, num_points=400)
                         n = Navigator(droid, tracker, args.heading_offset)
                         n.start(smooth_path[0], waypoints=waypoints[0])
                         nav[0] = n
