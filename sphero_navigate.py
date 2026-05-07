@@ -440,6 +440,11 @@ class Navigator:
         self.max_cte = 0.0
         self.waypoints = []
 
+        # Adaptive replanning
+        self._path_lock = threading.Lock()
+        self._pending_replan = None   # (new_path, new_waypoints) queued by main thread
+        self.next_waypoint_idx = 0    # which user waypoint is next (for mid-nav replan)
+
     def start(self, smooth_path, waypoints=None):
         """Start pure pursuit navigation along a smooth interpolated path."""
         self.path        = list(smooth_path)
@@ -456,12 +461,19 @@ class Navigator:
         self.in_stuck_recovery = False
         self.cte_history = []
         self.max_cte = 0.0
+        self.next_waypoint_idx = 0
+        self._pending_replan = None
 
         self._thread     = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self):
         self.active = False
+
+    def extend_path(self, additional_points):
+        """Append new path segment without disturbing current navigation. path_idx is unchanged."""
+        self.path = self.path + list(additional_points)
+        print(f"[NAV] path extended to {len(self.path)} pts")
 
     def _log_metrics(self):
         """Log trajectory metrics to CSV file."""
@@ -731,10 +743,22 @@ def main():
             wp = click_to_uv(x, y)
             waypoints[0].append(wp)
             print(f"  Waypoint {len(waypoints[0])}: u={wp[0]:.3f}  v={wp[1]:.3f}")
-            # If already navigating, let current plan finish; next click restarts
-            if state == STATE_WAIT_B and len(waypoints[0]) > 0:
-                # Auto-start when first waypoint is set in wait state
-                pass
+
+            if state == STATE_NAV:
+                # Extend route: append a new segment from last path point to new waypoint
+                n = nav[0]
+                if n and n.active and smooth_path[0]:
+                    last_pt = smooth_path[0][-1]
+                    dist_cm = math.hypot(
+                        (wp[0] - last_pt[0]) * PAPER_X_CM,
+                        (wp[1] - last_pt[1]) * PAPER_Y_CM,
+                    )
+                    n_pts = max(20, int(dist_cm * 5))  # ~5 pts/cm
+                    segment = interpolate_smooth_path([last_pt, wp], num_points=n_pts)
+                    tail = list(segment[1:])  # drop first point (duplicate of last_pt)
+                    smooth_path[0] = smooth_path[0] + tail   # update display
+                    n.extend_path(tail)
+                    print(f"[PLAN] extended path +{len(tail)} pts ({dist_cm:.1f}cm) → wp{len(waypoints[0])}")
 
     cv2.setMouseCallback(WIN, mouse_cb)
 
