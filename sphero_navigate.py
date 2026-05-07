@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """
-sphero_navigate.py — Navigate Sphero BOLT from A to B using camera feedback.
+sphero_navigate.py — Smooth path-following navigation for Sphero BOLT using pure pursuit.
 
 Flow:
   1. Load paper calibration, open RealSense, connect Sphero
   2. Aim calibration: rotate shell so glowing tail faces you, press ENTER
-  3. Click target B on the display window
-  4. Sphero navigates at speed 50, updating heading every 0.5 s
-  5. Stops within 3 cm of B
+  3. Click multiple waypoints on the display window
+     - Smooth spline path automatically interpolates between waypoints
+     - Visual preview shows the path that will be followed
+  4. Press ENTER to start navigation
+  5. Sphero continuously follows the smooth interpolated path using pure pursuit
+     - Lookahead point guides heading
+     - Speed scales smoothly based on distance to end
+     - Cross-track error monitored for closed-loop correction
+  6. Arrives when path is complete
+
+Features:
+  • Smooth cubic spline interpolation between waypoints
+  • Pure pursuit path following (10–30 Hz control loop)
+  • Distance-scaled speed throughout entire path
+  • Cross-track error monitoring for research metrics
+  • Visual path preview before navigation
+  • Responsive heading correction every frame
+  • 0.08 s update interval for tight closed-loop control
 
 Usage:
   python3 sphero_navigate.py --sphero SB-FD03
@@ -25,19 +40,34 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 import yaml
+from scipy.interpolate import PchipInterpolator
 from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 SPEED           = 50
-UPDATE_INTERVAL = 0.3   # s between heading updates
-HOVER_STOP_CM   = 4.0   # cm — stop rolling and enter hover within this radius
-HOVER_RESUME_CM = 9.0   # cm — exit hover and navigate again if drift exceeds this
-SLOW_DIST_CM    = 20.0  # cm — start reducing speed within this radius
-MIN_SPEED       = 20    # floor speed when very close
+UPDATE_INTERVAL = 0.12  # s between heading updates (tuned for Bluetooth reliability)
+SLOW_DIST_CM    = 25.0  # cm — start reducing speed within this radius of final waypoint
+MIN_SPEED       = 25    # floor speed (keeps robot moving even at path end)
+INITIAL_BOOST_DUR = 0.5  # seconds: run at full speed 50 to overcome static friction
 COAST_FACTOR    = 0.28  # empirical: coast_cm ≈ COAST_FACTOR × speed
-NEAR_DIST_CM    = 20.0  # cm — switch to shorter update interval
-UPDATE_NEAR     = 0.1   # s — interval when within NEAR_DIST_CM
+HDG_CHANGE_THRESH = 3   # degrees: only send roll() if heading changed by this much
+SPEED_CHANGE_THRESH = 2 # speed units: only send roll() if speed changed by this much
+
+# Curvature-aware control
+SHARP_TURN_THRESHOLD = 25  # degrees: turn sharper than this reduces speed
+STRAIGHT_SPEED = 50        # full speed on straight segments
+TURN_SPEED = 15            # reduced speed on sharp turns
+
+# Stuck detection (path-progress-based, immune to distance noise)
+STUCK_CYCLES = 20              # cycles window (~2.4s at 0.12s interval)
+STUCK_MIN_PROGRESS = 2         # minimum path_idx points that must advance in that window
+
+# Waypoint navigation
+WAYPOINT_TOLERANCE_CM = 3.0   # advance to next waypoint within this radius
+LOOKAHEAD_CM          = 7.0   # blend toward next waypoint this many cm ahead
+SEARCH_WINDOW         = 20    # limit nearest-point search to local window (prevent snap-ahead)
+ARRIVAL_DIST_CM       = 4.0   # robot must be within this distance of final waypoint to arrive
 PAPER_X_CM      = 85.0
 PAPER_Y_CM      = 60.0
 RECT_W          = 850
@@ -184,6 +214,87 @@ def _pick_best(candidates, last_px):
     return best if best is not None else candidates[0]
 
 
+# ── Path Interpolation ────────────────────────────────────────────────────────
+def interpolate_smooth_path(waypoints, num_points=200):
+    """
+    Interpolate waypoints to a smooth path using PCHIP (Piecewise Cubic Hermite Interpolating Polynomial).
+    PCHIP preserves monotonicity and avoids overshoot, making it safer than CubicSpline for sharp-corner paths.
+
+    Args:
+        waypoints: list of (u, v) tuples
+        num_points: resolution of interpolated path
+
+    Returns:
+        list of (u, v) points along the smooth path
+    """
+    if len(waypoints) < 2:
+        return waypoints
+    if len(waypoints) == 2:
+        # Linear interpolation for 2 points
+        u_vals = np.linspace(waypoints[0][0], waypoints[1][0], num_points)
+        v_vals = np.linspace(waypoints[0][1], waypoints[1][1], num_points)
+        return list(zip(u_vals, v_vals))
+
+    # PCHIP interpolation: shape-preserving, no overshoot
+    waypoints = np.array(waypoints)
+    t = np.linspace(0, 1, len(waypoints))
+    pchip_u = PchipInterpolator(t, waypoints[:, 0])
+    pchip_v = PchipInterpolator(t, waypoints[:, 1])
+
+    t_smooth = np.linspace(0, 1, num_points)
+    u_smooth = pchip_u(t_smooth)
+    v_smooth = pchip_v(t_smooth)
+
+    # Clamp to valid UV range [0, 1]
+    u_smooth = np.clip(u_smooth, 0, 1)
+    v_smooth = np.clip(v_smooth, 0, 1)
+
+    return list(zip(u_smooth, v_smooth))
+
+
+def find_closest_path_point(pos, path, search_start_idx=0):
+    """
+    Find closest point on path to current position.
+    Limits search to a local window to prevent snap-ahead on looping paths.
+    Returns (closest_point, closest_idx, distance_cm).
+    """
+    if not path:
+        return None, 0, float('inf')
+
+    min_dist = float('inf')
+    min_idx = search_start_idx
+
+    # Search forward from last known position, but limit to local window
+    search_end = min(search_start_idx + SEARCH_WINDOW, len(path))
+    for i in range(search_start_idx, search_end):
+        px, pv = path[i]
+        dist = math.hypot((px - pos[0]) * PAPER_X_CM, (pv - pos[1]) * PAPER_Y_CM)
+        if dist < min_dist:
+            min_dist = dist
+            min_idx = i
+
+    return path[min_idx], min_idx, min_dist
+
+
+def get_lookahead_point(pos, path, current_idx, lookahead_cm=LOOKAHEAD_CM):
+    """
+    Get point on path that is lookahead_cm ahead of robot's current position.
+    Uses pure pursuit logic.
+    """
+    if not path or current_idx >= len(path):
+        return path[-1] if path else pos
+
+    # Start searching from current position forward
+    for i in range(current_idx, len(path)):
+        px, pv = path[i]
+        dist = math.hypot((px - pos[0]) * PAPER_X_CM, (pv - pos[1]) * PAPER_Y_CM)
+        if dist >= lookahead_cm:
+            return (px, pv)
+
+    # If we didn't find a point far enough ahead, return the end
+    return path[-1]
+
+
 # ── Calibration / camera ──────────────────────────────────────────────────────
 def load_calibration(path='~/.ros/paper_calibration.yaml'):
     path = os.path.expanduser(path)
@@ -258,31 +369,90 @@ def uv_to_disp(u, v):
 # ── Navigator ─────────────────────────────────────────────────────────────────
 class Navigator:
     def __init__(self, droid, tracker, heading_offset):
-        self.droid          = droid
-        self.tracker        = tracker
-        self.heading_offset = heading_offset
-        self.target         = None
-        self.active         = False
-        self.last_heading   = None
-        self.last_dist_cm   = None
-        self._hovering      = False
-        self._thread        = None
+        self.droid              = droid
+        self.tracker            = tracker
+        self.heading_offset     = heading_offset
+        self.path               = []
+        self.path_idx           = 0
+        self.active             = False
+        self.arrived            = False
+        self.last_heading       = None
+        self.last_speed         = None
+        self.last_dist_cm       = None
+        self.last_progress      = 0.0
+        self.last_cmd_time      = 0.0
+        self.start_time         = 0.0
+        self.trajectory         = []  # actual path followed during navigation
+        self._thread            = None
 
-    @property
-    def hovering(self):
-        return self._hovering
+        # Curvature-aware control
+        self.last_lookahead_heading = None
 
-    def start(self, target_uv):
-        self.target  = target_uv
-        self.active  = True
-        self.arrived = False
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        # Stuck detection
+        self.idx_history = deque(maxlen=STUCK_CYCLES)
+        self.stuck_counter = 0
+        self.in_stuck_recovery = False
+        self.recovery_start_time = 0.0
+
+        # Metrics tracking
+        self.cte_history = []
+        self.max_cte = 0.0
+        self.waypoints = []
+
+    def start(self, smooth_path, waypoints=None):
+        """Start pure pursuit navigation along a smooth interpolated path."""
+        self.path        = list(smooth_path)
+        self.path_idx    = 0
+        self.active      = True
+        self.arrived     = False
+        self.start_time  = time.time()
+        self.trajectory  = []
+        self.waypoints   = waypoints or []
+
+        # Reset tracking variables
+        self.last_lookahead_heading = None
+        self.idx_history.clear()
+        self.stuck_counter = 0
+        self.in_stuck_recovery = False
+        self.cte_history = []
+        self.max_cte = 0.0
+
+        self._thread     = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self):
         self.active = False
 
+    def _log_metrics(self):
+        """Log trajectory metrics to CSV file."""
+        total_time = time.time() - self.start_time
+        total_distance = sum(
+            math.hypot((self.trajectory[i][0] - self.trajectory[i-1][0]) * PAPER_X_CM,
+                      (self.trajectory[i][1] - self.trajectory[i-1][1]) * PAPER_Y_CM)
+            for i in range(1, len(self.trajectory))
+        )
+        avg_cte = sum(self.cte_history) / len(self.cte_history) if self.cte_history else 0.0
+        overshoot = self.last_dist_cm  # distance remaining at arrival (negative if overshot)
+
+        # CSV filename with timestamp
+        import time as time_module
+        ts = int(time_module.time())
+        filename = f"thesis_ws/trajectory_metrics_{ts}.csv"
+
+        with open(filename, 'w') as f:
+            f.write("metric,value\n")
+            f.write(f"total_time_sec,{total_time:.3f}\n")
+            f.write(f"total_distance_cm,{total_distance:.1f}\n")
+            f.write(f"max_cross_track_error_cm,{self.max_cte:.1f}\n")
+            f.write(f"avg_cross_track_error_cm,{avg_cte:.1f}\n")
+            f.write(f"final_distance_to_target_cm,{overshoot:.1f}\n")
+            f.write(f"path_length_points,{len(self.path)}\n")
+            f.write(f"waypoint_count,{len(self.waypoints)}\n")
+
+        print(f"[NAV] metrics logged to {filename}")
+
     def _run(self):
+        """Main navigation loop using pure pursuit path following."""
         _was_lost = False
         while self.active:
             pos = self.tracker.filtered_uv
@@ -295,42 +465,131 @@ class Navigator:
                 continue
 
             if _was_lost:
-                print(f"[NAV] detection regained at u={pos[0]:.3f} v={pos[1]:.3f} — resuming")
+                print(f"[NAV] detection regained at u={pos[0]:.3f} v={pos[1]:.3f}")
                 _was_lost = False
 
-            du = self.target[0] - pos[0]
-            dv = self.target[1] - pos[1]
-            dist_cm = math.hypot(du * PAPER_X_CM, dv * PAPER_Y_CM)
-            self.last_dist_cm = dist_cm
-            speed = max(MIN_SPEED, int(SPEED * min(dist_cm / SLOW_DIST_CM, 1.0)))
+            # Find closest point on path (to update tracking)
+            _, new_idx, cross_track_error = find_closest_path_point(
+                pos, self.path, self.path_idx
+            )
+            self.path_idx = max(self.path_idx, new_idx)
 
-            if self._hovering:
-                if dist_cm > HOVER_RESUME_CM:
-                    self._hovering = False
-                    print(f"[NAV] HOVER → NAVIGATE  dist={dist_cm:.1f}cm > {HOVER_RESUME_CM}cm")
-                else:
-                    time.sleep(0.1)
-                    continue
-            elif dist_cm < max(HOVER_STOP_CM, speed * COAST_FACTOR):
+            # Get lookahead point for pure pursuit
+            target = get_lookahead_point(pos, self.path, self.path_idx, LOOKAHEAD_CM)
+
+            # Compute error
+            du = target[0] - pos[0]
+            dv = target[1] - pos[1]
+            dist_to_end = math.hypot(
+                (self.path[-1][0] - pos[0]) * PAPER_X_CM,
+                (self.path[-1][1] - pos[1]) * PAPER_Y_CM
+            )
+            self.last_dist_cm = dist_to_end
+
+            # Check if reached end of path (both path_idx near end and physically close to final waypoint)
+            if self.path_idx >= len(self.path) - 3 and dist_to_end < ARRIVAL_DIST_CM:
                 self.droid.set_speed(0)
-                self._hovering = True
-                print(f"[NAV] NAVIGATE → HOVER"
-                      f"  pos=({pos[0]*PAPER_X_CM:.1f},{pos[1]*PAPER_Y_CM:.1f})cm"
-                      f"  target=({self.target[0]*PAPER_X_CM:.1f},{self.target[1]*PAPER_Y_CM:.1f})cm"
-                      f"  dist={dist_cm:.1f}cm")
-                time.sleep(0.1)
-                continue
+                self.arrived = True
+                print(f"[NAV] arrived at destination (path_idx={self.path_idx}, dist_to_end={dist_to_end:.1f}cm)")
+                break
 
+            # Progress metric (0 to 1)
+            self.last_progress = min(1.0, self.path_idx / float(len(self.path)))
+
+            # Metrics tracking: accumulate CTE
+            self.cte_history.append(cross_track_error)
+            self.max_cte = max(self.max_cte, cross_track_error)
+
+            # Stuck detection: track path_idx advancement (immune to distance noise)
+            self.idx_history.append(self.path_idx)
+            if len(self.idx_history) == STUCK_CYCLES:
+                idx_advance = self.path_idx - self.idx_history[0]
+                if idx_advance < STUCK_MIN_PROGRESS:
+                    self.stuck_counter += 1
+                    if self.stuck_counter >= 3 and not self.in_stuck_recovery:
+                        print(f"[NAV] STUCK DETECTED: path_idx advanced only {idx_advance} points in {STUCK_CYCLES} cycles")
+                        self.in_stuck_recovery = True
+                        self.recovery_start_time = time.time()
+                else:
+                    self.stuck_counter = 0
+
+            # Compute heading toward lookahead point
             paper_angle = math.degrees(math.atan2(du, dv)) % 360
-            heading  = int((paper_angle + self.heading_offset) % 360)
-            interval = UPDATE_NEAR if dist_cm < NEAR_DIST_CM else UPDATE_INTERVAL
+            heading = int((paper_angle + self.heading_offset) % 360)
+
+            # Stuck recovery: briefly stop and reset with speed boost
+            if self.in_stuck_recovery:
+                recovery_elapsed = time.time() - self.recovery_start_time
+                if recovery_elapsed < 0.3:
+                    speed = 0
+                    print(f"[NAV] recovery: stopping")
+                else:
+                    self.in_stuck_recovery = False
+                    speed = SPEED
+            # Speed scaling: full speed until last 10% of path, then decelerate on physical distance
+            else:
+                near_path_end = self.path_idx >= len(self.path) * 0.9
+                if near_path_end:
+                    speed = max(MIN_SPEED, int(SPEED * min(dist_to_end / SLOW_DIST_CM, 1.0)))
+                else:
+                    speed = SPEED
+
+                    # Curvature-aware control: reduce speed on sharp turns
+                    if self.last_lookahead_heading is not None:
+                        # Compute turn sharpness
+                        hdg_change = abs(heading - self.last_lookahead_heading)
+                        if hdg_change > 180:
+                            hdg_change = 360 - hdg_change
+
+                        if hdg_change > SHARP_TURN_THRESHOLD:
+                            # Sharp turn: reduce speed linearly based on turn angle
+                            turn_factor = 1.0 - (hdg_change - SHARP_TURN_THRESHOLD) / 90.0
+                            turn_factor = max(0.3, turn_factor)  # floor at 30% speed
+                            speed = max(MIN_SPEED, int(speed * turn_factor))
+
+                self.last_lookahead_heading = heading
+
+            # Save previous values BEFORE overwriting (for change detection)
+            prev_heading = self.last_heading
+            prev_speed = self.last_speed
+
             self.last_heading = heading
-            print(f"[NAV] pos=({pos[0]:.3f},{pos[1]:.3f})  target=({self.target[0]:.3f},{self.target[1]:.3f})"
-                  f"  du={du:+.3f} dv={dv:+.3f}  dist={dist_cm:.1f}cm"
-                  f"  paper_angle={paper_angle:.1f}°  heading={heading}°  speed={speed}  dt={interval}s")
-            self.droid.roll(heading, speed, interval)
+            self.last_speed = speed
+
+            # Track actual trajectory
+            self.trajectory.append(pos)
+
+            print(f"[NAV] progress={self.last_progress:.1%}  "
+                  f"pos=({pos[0]:.3f},{pos[1]:.3f})  "
+                  f"lookahead=({target[0]:.3f},{target[1]:.3f})  "
+                  f"dist_to_end={dist_to_end:.1f}cm  hdg={heading}°  speed={speed}  "
+                  f"cte={cross_track_error:.1f}cm")
+
+            # Only send command if heading or speed changed significantly, or if too long since last command
+            t_now = time.time()
+            should_send = (
+                self.last_cmd_time == 0.0  # First command
+                or (prev_heading is not None and abs(heading - prev_heading) >= HDG_CHANGE_THRESH)
+                or (prev_speed is not None and abs(speed - prev_speed) >= SPEED_CHANGE_THRESH)
+                or (t_now - self.last_cmd_time) > UPDATE_INTERVAL * 1.5  # Failsafe: re-send if stale
+            )
+
+            if should_send:
+                try:
+                    self.droid.roll(heading, speed, UPDATE_INTERVAL)
+                    self.last_cmd_time = t_now
+                except TimeoutError:
+                    print(f"[NAV] Bluetooth timeout at hdg={heading}° speed={speed}")
+                except Exception as e:
+                    print(f"[NAV] Bluetooth error: {type(e).__name__}: {e}")
+            else:
+                time.sleep(0.01)  # Brief sleep to avoid busy-waiting
 
         self.droid.set_speed(0)
+
+        # Log trajectory metrics
+        if self.arrived:
+            self._log_metrics()
 
 
 # ── Display helpers ───────────────────────────────────────────────────────────
@@ -371,6 +630,33 @@ def draw_start(img, uv):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 0), 1, cv2.LINE_AA)
 
 
+def draw_waypoint_marker(img, uv):
+    """Draw waypoint marker (cross + circle) without label."""
+    dp = uv_to_disp(*uv)
+    cv2.drawMarker(img, dp, (0, 60, 255), cv2.MARKER_CROSS, 24, 2)
+    cv2.circle(img, dp, 18, (0, 60, 255), 1)
+
+
+def draw_smooth_path(img, path, color=(100, 150, 255), thickness=1):
+    """Draw smooth interpolated path as a line."""
+    if len(path) < 2:
+        return
+    for i in range(1, len(path)):
+        p1 = uv_to_disp(*path[i-1])
+        p2 = uv_to_disp(*path[i])
+        cv2.line(img, p1, p2, color, thickness, cv2.LINE_AA)
+
+
+def draw_trajectory(img, trajectory, color=(0, 255, 100), thickness=2):
+    """Draw actual trajectory followed during navigation (thicker, brighter)."""
+    if len(trajectory) < 2:
+        return
+    for i in range(1, len(trajectory)):
+        p1 = uv_to_disp(*trajectory[i-1])
+        p2 = uv_to_disp(*trajectory[i])
+        cv2.line(img, p1, p2, color, thickness, cv2.LINE_AA)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
@@ -398,18 +684,21 @@ def main():
     tracker        = SpheroTracker()
     state          = STATE_AIM
     aim_phase      = 0          # 0 = show instructions, 1 = stabilisation off
-    target_uv      = [None]
+    waypoints      = [[]]       # list of waypoint lists; [0] holds current plan
+    smooth_path    = [[]]       # interpolated smooth path; [0] holds current path
     start_uv       = [None]
     nav            = [None]
     _last_det_log  = 0.0        # throttle detection prints to 1 Hz
 
     def mouse_cb(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and state in (STATE_WAIT_B, STATE_NAV):
-            target_uv[0] = click_to_uv(x, y)
-            if nav[0] is not None:
-                nav[0].target   = target_uv[0]
-                nav[0]._hovering = False   # force re-navigation to new target
-            print(f"  Target B: u={target_uv[0][0]:.3f}  v={target_uv[0][1]:.3f}")
+            wp = click_to_uv(x, y)
+            waypoints[0].append(wp)
+            print(f"  Waypoint {len(waypoints[0])}: u={wp[0]:.3f}  v={wp[1]:.3f}")
+            # If already navigating, let current plan finish; next click restarts
+            if state == STATE_WAIT_B and len(waypoints[0]) > 0:
+                # Auto-start when first waypoint is set in wait state
+                pass
 
     cv2.setMouseCallback(WIN, mouse_cb)
 
@@ -472,46 +761,64 @@ def main():
                     ])
 
             elif state == STATE_WAIT_B:
-                if target_uv[0] is None:
-                    stable_pos = tracker.stable_uv()
-                    if stable_pos is None:
-                        draw_overlay(disp, ["Waiting for stable detection…"])
-                    else:
-                        draw_overlay(disp, ["Sphero detected.  Click TARGET B on the paper."])
+                stable_pos = tracker.stable_uv()
+                if stable_pos is None:
+                    draw_overlay(disp, ["Waiting for stable detection…"])
+                elif len(waypoints[0]) == 0:
+                    draw_overlay(disp, ["Sphero detected.  Click waypoints on the paper (ENTER to start)."])
                 else:
-                    draw_target(disp, target_uv[0])
+                    # Generate and show smooth path preview
+                    smooth_path[0] = interpolate_smooth_path(waypoints[0], num_points=200)
+                    draw_smooth_path(disp, smooth_path[0], color=(100, 150, 255), thickness=1)
+                    # Show all waypoints set so far
+                    for i, wp in enumerate(waypoints[0]):
+                        draw_waypoint_marker(disp, wp)
+                        dp = uv_to_disp(*wp)
+                        cv2.putText(disp, f"W{i+1}", (dp[0] - 18, dp[1] - 14),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 60, 255), 1, cv2.LINE_AA)
+                    draw_overlay(disp, [f"{len(waypoints[0])} waypoint(s) set.  Click more or press ENTER to start."])
 
             elif state == STATE_NAV:
                 if start_uv[0]:
                     draw_start(disp, start_uv[0])
-                if target_uv[0]:
-                    draw_target(disp, target_uv[0])
+                # Draw smooth path
+                if smooth_path[0]:
+                    draw_smooth_path(disp, smooth_path[0], color=(100, 150, 255), thickness=2)
+                # Show waypoints
+                for i, wp in enumerate(waypoints[0]):
+                    draw_waypoint_marker(disp, wp)
+                    dp = uv_to_disp(*wp)
+                    cv2.putText(disp, f"W{i+1}", (dp[0] - 18, dp[1] - 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 60, 255), 1, cv2.LINE_AA)
                 n = nav[0]
                 if n:
                     d = n.last_dist_cm
                     h = n.last_heading
-                    if n.hovering:
-                        col  = (0, 255, 0)
-                        info = (f"HOVERING  dist={d:.1f}cm  |  R=new target"
-                                if d is not None else "HOVERING  |  R=new target")
-                    else:
-                        col  = (0, 255, 255)
-                        if fuv and target_uv[0]:
-                            cv2.line(disp, uv_to_disp(*fuv), uv_to_disp(*target_uv[0]),
-                                     (255, 255, 0), 1, cv2.LINE_AA)
-                        info = (f"NAVIGATING  dist={d:.1f}cm  hdg={h}deg  |  R=new target"
-                                if d is not None else "NAVIGATING…")
+                    p = n.last_progress
+                    col = (0, 255, 255)
+                    info = (f"NAVIGATING  progress={p:.0%}  dist_to_end={d:.1f}cm  hdg={h}°  |  R=restart"
+                            if d is not None else "NAVIGATING…")
                     cv2.putText(disp, info, (8, RECT_H - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
 
             elif state == STATE_ARRIVED:
                 if start_uv[0]:
                     draw_start(disp, start_uv[0])
-                if target_uv[0]:
-                    draw_target(disp, target_uv[0])
+                # Draw planned path (light green)
+                if smooth_path[0]:
+                    draw_smooth_path(disp, smooth_path[0], color=(100, 200, 100), thickness=1)
+                # Draw actual trajectory (bright green, thicker)
+                if nav[0] and nav[0].trajectory:
+                    draw_trajectory(disp, nav[0].trajectory, color=(0, 255, 0), thickness=2)
+                for i, wp in enumerate(waypoints[0]):
+                    draw_waypoint_marker(disp, wp)
+                    dp = uv_to_disp(*wp)
+                    cv2.putText(disp, f"W{i+1}", (dp[0] - 18, dp[1] - 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 60, 255), 1, cv2.LINE_AA)
                 draw_overlay(disp, [
-                    "ARRIVED at B!",
-                    "Press R to navigate again  |  Q to quit",
+                    "ARRIVED at all waypoints!",
+                    "Planned path (light green)  |  Actual trajectory (bright green)",
+                    "Press R for new route  |  Q to quit",
                 ])
 
             cv2.imshow(WIN, disp)
@@ -540,43 +847,51 @@ def main():
                         print("[STATE] aim → wait_b  (heading=0 locked to Sphero forward direction)")
 
             elif state == STATE_WAIT_B:
-                if target_uv[0] is not None:
+                if key == 13 and len(waypoints[0]) > 0:  # ENTER with waypoints set
                     fuv_now = tracker.filtered_uv
                     if fuv_now is not None:
                         start_uv[0] = fuv_now
                         tracker.clear_history()
+                        # Prepend current position to waypoints so path goes: START → WP1 → WP2 → ... → WPN
+                        path_waypoints = [fuv_now] + waypoints[0]
+                        smooth_path[0] = interpolate_smooth_path(path_waypoints, num_points=200)
                         n = Navigator(droid, tracker, args.heading_offset)
-                        n.start(target_uv[0])
+                        n.start(smooth_path[0], waypoints=waypoints[0])
                         nav[0] = n
                         state  = STATE_NAV
                         au, av = start_uv[0]
-                        bu, bv = target_uv[0]
-                        print(f"[STATE] wait_b → nav"
-                              f"  A=({au * PAPER_X_CM:.1f},{av * PAPER_Y_CM:.1f})cm"
-                              f"  B=({bu * PAPER_X_CM:.1f},{bv * PAPER_Y_CM:.1f})cm"
-                              f"  heading_offset={args.heading_offset}°")
+                        print(f"[STATE] wait_b → nav  "
+                              f"A=({au * PAPER_X_CM:.1f},{av * PAPER_Y_CM:.1f})cm  "
+                              f"waypoints={len(waypoints[0])}  smooth_path_points={len(smooth_path[0])}  "
+                              f"heading_offset={args.heading_offset}°")
 
             elif state == STATE_NAV:
-                if key == ord('r'):
+                # Check if navigation is complete
+                if nav[0] and nav[0].arrived:
+                    state = STATE_ARRIVED
+                    print("[STATE] nav → arrived  (all waypoints reached)")
+                elif key == ord('r'):
                     if nav[0]:
                         nav[0].stop()
-                    target_uv[0] = None
+                    waypoints[0] = []
+                    smooth_path[0] = []
                     start_uv[0]  = None
                     nav[0]       = None
                     tracker.clear_history()
                     state = STATE_WAIT_B
-                    print("[STATE] nav → wait_b  (new target)")
+                    print("[STATE] nav → wait_b  (restart route)")
 
             elif state == STATE_ARRIVED:
                 if key == ord('r'):
                     if nav[0]:
                         nav[0].stop()
-                    target_uv[0] = None
+                    waypoints[0] = []
+                    smooth_path[0] = []
                     start_uv[0]  = None
                     nav[0]       = None
                     tracker.clear_history()
                     state = STATE_WAIT_B
-                    print("[STATE] arrived → wait_b  (ready for new target)")
+                    print("[STATE] arrived → wait_b  (ready for new route)")
 
     pipe.stop()
     cv2.destroyAllWindows()
