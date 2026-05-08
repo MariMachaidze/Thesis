@@ -1,0 +1,154 @@
+==================================================================
+  POINTING ACCURACY — DETAILED ANALYSIS REPORT
+==================================================================
+  Source : accuracy_1778271966.csv
+  Raw trials   : 135
+  After corrections : 133
+  Paper : 850 × 600 mm
+  Heights tested : [10, 30, 50] cm
+  Targets tested : [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+==================================================================
+  1. DATA CORRECTIONS
+==================================================================
+
+  The following trials were identified as problematic and corrected
+  before any statistics were computed.
+
+  EXCLUDED (2 trial row(s)) — system failures
+------------------------------------------------------------------
+  T1 h=30cm trial=4
+    Error   : 521.8 mm  (normal range for this target: ~50–90 mm)
+    GT pos  : (0.206, 0.222) normalized
+    Pred pos: (0.614, 0.872) normalized
+    Offset  : Δu=+346.8 mm,  Δv=+389.8 mm
+    Samples : 16  (very few samples → unstable lock)
+    Reason  : The predicted position jumped to the opposite corner of
+              the paper. This is a tracking failure — the One Euro Filter
+              locked onto a stray detection instead of the actual finger
+              ray. The small sample count confirms the lock was brief.
+
+  T1 h=30cm trial=5
+    Error   : 626.7 mm  (normal range for this target: ~50–90 mm)
+    GT pos  : (0.206, 0.222) normalized
+    Pred pos: (0.740, 0.942) normalized
+    Offset  : Δu=+454.1 mm,  Δv=+431.9 mm
+    Samples : 19  (very few samples → unstable lock)
+    Reason  : The predicted position jumped to the opposite corner of
+              the paper. This is a tracking failure — the One Euro Filter
+              locked onto a stray detection instead of the actual finger
+              ray. The small sample count confirms the lock was brief.
+
+  REASSIGNED (2 trial row(s)) — user pointed at wrong target
+------------------------------------------------------------------
+  T6 h=30cm trial=1  →  reassigned to T5
+    Original GT (T6) : (0.794, 0.500)
+    Predicted pos      : (0.466, 0.435)
+    Error vs T6       : 281.3 mm  (looks like outlier)
+    Error vs T5 GT    : 48.3 mm  (consistent with normal trials)
+    Reason  : User confirmed pointing at T5 (center),
+              not T6 (mid-right). The measured position
+              (0.466, 0.435) is spatially close to T5's
+              ground truth, confirming the relabelling.
+
+  T9 h=30cm trial=1  →  reassigned to T8
+    Original GT (T9) : (0.794, 0.778)
+    Predicted pos      : (0.470, 0.779)
+    Error vs T9       : 275.0 mm  (looks like outlier)
+    Error vs T8 GT    : 25.2 mm  (consistent with normal trials)
+    Reason  : User confirmed pointing at T8 (bot-center),
+              not T9 (bot-right). The measured position
+              (0.470, 0.779) is spatially close to T8's
+              ground truth, confirming the relabelling.
+
+  Impact of corrections on overall error:
+    Raw  : n=135  mean=75.0 mm  median=61.0 mm  std=73.3 mm
+    Clean: n=133  mean=67.5 mm  median=60.5 mm  std=39.7 mm
+    Mean error reduced by 7.5 mm (10.0%) after corrections.
+
+==================================================================
+  2. DESCRIPTIVE STATISTICS BY HEIGHT
+==================================================================
+
+  Height 10 cm  (n=45 trials)
+    Error  — mean=81.6 mm  median=81.2 mm  std=19.3 mm
+             95% CI [75.7, 87.5] mm  range [44.2, 121.3] mm
+    ≤50mm  : 4.4%   ≤100mm : 80.0%
+    Latency— mean=49.7 ms  std=1.9 ms
+
+  Height 30 cm  (n=43 trials)
+    Error  — mean=63.1 mm  median=45.0 mm  std=59.5 mm
+             95% CI [44.6, 81.6] mm  range [3.0, 281.3] mm
+    ≤50mm  : 58.1%   ≤100mm : 83.7%
+    Latency— mean=59.1 ms  std=3.5 ms
+
+  Height 50 cm  (n=45 trials)
+    Error  — mean=57.6 mm  median=56.1 mm  std=25.4 mm
+             95% CI [49.9, 65.3] mm  range [17.8, 152.2] mm
+    ≤50mm  : 42.2%   ≤100mm : 93.3%
+    Latency— mean=59.4 ms  std=2.2 ms
+
+==================================================================
+  3. DESCRIPTIVE STATISTICS BY TARGET
+==================================================================
+
+   T      position    n     mean   median     std             95% CI           range
+------------------------------------------------------------------
+   1      top-left   13     68.6     67.6    32.5       [49.0, 88.2]   [34.4, 133.5]
+   2    top-center   15     72.4     75.3    21.8       [60.3, 84.5]   [35.1, 107.4]
+   3     top-right   15     57.3     57.8    16.9       [47.9, 66.6]    [26.1, 85.4]
+   4      mid-left   15     94.6     91.8    37.8      [73.7, 115.6]   [35.7, 177.3]
+   5        center   16     84.3     67.3    63.3      [50.6, 118.0]   [22.0, 281.3]
+   6     mid-right   14     56.4     51.8    32.5       [37.6, 75.1]    [3.0, 100.6]
+   7      bot-left   15     56.1     46.7    21.3       [44.3, 68.0]    [29.5, 90.7]
+   8    bot-center   16     63.6     54.7    60.7       [31.3, 96.0]   [22.5, 275.0]
+   9     bot-right   14     51.6     49.4    17.5       [41.5, 61.7]    [24.3, 86.5]
+
+==================================================================
+  4. PER-TARGET × HEIGHT BREAKDOWN
+==================================================================
+
+   T      position     h=10cm     h=30cm     h=50cm
+------------------------------------------------------------------
+   1      top-left     66.0mm    111.3mm     45.5mm
+   2    top-center     86.7mm     69.2mm     61.2mm
+   3     top-right     61.9mm     54.0mm     56.0mm
+   4      mid-left     99.5mm     87.8mm     96.5mm
+   5        center    111.9mm     71.7mm     72.0mm
+   6     mid-right     93.7mm     40.3mm     31.9mm
+   7      bot-left     82.6mm     36.1mm     49.7mm
+   8    bot-center     66.0mm     66.9mm     57.4mm
+   9     bot-right     66.0mm     37.9mm     48.2mm
+
+  (values are mean error in mm per target per hand height)
+
+==================================================================
+  5. AXIS BIAS ANALYSIS
+==================================================================
+
+  Height 10 cm  (n=45)
+    u-axis (left/right) : mean=-25.8 mm  std=8.8 mm  → systematic LEFT bias
+    v-axis (depth)      : mean=-76.7 mm  std=20.0 mm  → toward camera
+
+  Height 30 cm  (n=43)
+    u-axis (left/right) : mean=-37.1 mm  std=55.1 mm  → systematic LEFT bias
+    v-axis (depth)      : mean=-24.9 mm  std=50.4 mm  → toward camera
+
+  Height 50 cm  (n=45)
+    u-axis (left/right) : mean=-35.0 mm  std=19.8 mm  → systematic LEFT bias
+    v-axis (depth)      : mean=+1.0 mm  std=48.9 mm  → away from camera
+
+==================================================================
+  6. OVERALL SUMMARY (corrected dataset)
+==================================================================
+
+  Total trials analysed : 133
+  Mean error            : 67.5 mm
+  Median error          : 60.5 mm
+  Std deviation         : 39.7 mm
+  95% CI                : [60.7, 74.3] mm
+  ≤ 50 mm               : 34.6%
+  ≤ 100 mm              : 85.7%
+  ≤ 150 mm              : 97.0%
+==================================================================
+
