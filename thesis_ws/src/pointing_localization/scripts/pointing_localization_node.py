@@ -6,7 +6,6 @@ Calculates where the finger points on the paper plane
 
 import rospy
 import numpy as np
-import time
 
 from finger_analysis.msg import FingerAnalysis
 from camera_calibration.msg import CalibrationData
@@ -36,10 +35,7 @@ class OneEuroFilter:
         tau = 1.0 / (2.0 * np.pi * cutoff)
         return 1.0 / (1.0 + tau / dt)
 
-    def filter(self, x, t=None):
-        if t is None:
-            t = time.time()
-
+    def __call__(self, x, t):
         if self.t_prev is None:
             self.x_prev = x
             self.t_prev = t
@@ -87,29 +83,61 @@ class PointingLocalizationNode:
         # Calibration data
         self.calibration = None
 
-        # One Euro Filter parameters
-        min_cutoff = rospy.get_param('~filter_min_cutoff', 1.0)
-        beta = rospy.get_param('~filter_beta', 0.007)
-        d_cutoff = rospy.get_param('~filter_d_cutoff', 1.0)
+        # U filter — responsive, higher beta is fine because U speed is moderate
+        min_cutoff   = rospy.get_param('~filter_min_cutoff',   1.0)
+        beta         = rospy.get_param('~filter_beta',         0.007)
+        d_cutoff     = rospy.get_param('~filter_d_cutoff',     1.0)
         self.filter_u = OneEuroFilter(min_cutoff, beta, d_cutoff)
-        self.filter_v = OneEuroFilter(min_cutoff, beta, d_cutoff)
+
+        # V filter — separate params: V is 1.4-1.8x faster than U and spends 2x
+        # more time at the paper edges, so it needs more smoothing (lower beta).
+        min_cutoff_v = rospy.get_param('~filter_min_cutoff_v', min_cutoff)
+        beta_v       = rospy.get_param('~filter_beta_v',       beta)
+        self.filter_v = OneEuroFilter(min_cutoff_v, beta_v, d_cutoff)
 
         # Diagnostic / bypass parameters
         self.diagnose_pointing = rospy.get_param('~diagnose_pointing', False)
         self.bypass_filters = rospy.get_param('~bypass_filters', False)
-        self._last_diag_time = 0.0
         if self.diagnose_pointing:
             self.diag_pointing_pub = rospy.Publisher('/diag/pointing_raw', Point, queue_size=1)
             rospy.loginfo("Pointing Localization Node: diagnose_pointing=True — diagnostic mode active")
         if self.bypass_filters:
             rospy.loginfo("Pointing Localization Node: bypass_filters=True — One Euro Filter disabled")
 
+        self._was_valid = False
+        self._not_straight_count = 0
+        self._NOT_STRAIGHT_RESET = 5
+
+        # Reset UV filters after a gap — if the intersection was out of bounds for
+        # >UV_GAP_RESET_S seconds the filter state is stale; starting fresh from the
+        # next raw value prevents the large lag spike on resume.
+        self._UV_GAP_RESET_S = rospy.get_param('~uv_gap_reset_s', 0.5)
+        self._last_valid_uv_t = None
+
         rospy.loginfo("Pointing Localization Node: Ready (One Euro Filter)")
     
     def calib_callback(self, msg):
-        """Store calibration data"""
+        """Store calibration data and run sanity checks."""
         self.calibration = msg
-        rospy.loginfo("Calibration data received")
+
+        normal = np.array([msg.plane_normal.x, msg.plane_normal.y, msg.plane_normal.z])
+        x_axis = np.array([msg.paper_x_axis.x, msg.paper_x_axis.y, msg.paper_x_axis.z])
+        y_axis = np.array([msg.paper_y_axis.x, msg.paper_y_axis.y, msg.paper_y_axis.z])
+        n_norm = float(np.linalg.norm(normal))
+        x_norm = float(np.linalg.norm(x_axis))
+        y_norm = float(np.linalg.norm(y_axis))
+        ortho_xy = float(abs(np.dot(x_axis / max(x_norm, 1e-9),
+                                    y_axis / max(y_norm, 1e-9))))
+        rospy.loginfo(
+            "[PL] Calibration: normal_norm=%.4f  x_norm=%.4f  y_norm=%.4f  "
+            "x·y=%.4f  paper=%.3fx%.3fm",
+            n_norm, x_norm, y_norm, ortho_xy, msg.paper_x_m, msg.paper_y_m)
+        if abs(n_norm - 1.0) > 0.02:
+            rospy.logwarn("[PL] Plane normal is not a unit vector: norm=%.4f — "
+                          "recalibrate to fix systematic pointing drift", n_norm)
+        if ortho_xy > 0.05:
+            rospy.logwarn("[PL] Paper axes not orthogonal: |x·y|=%.4f — "
+                          "corner clicks may have been misplaced", ortho_xy)
     
     def ray_plane_intersection(self, ray_origin, ray_direction, plane_normal, plane_point):
         """
@@ -179,16 +207,38 @@ class PointingLocalizationNode:
             f"knuckle=({msg.knuckle_3d.x:.3f},{msg.knuckle_3d.y:.3f},{msg.knuckle_3d.z:.3f})")
 
         if not msg.is_straight:
-            return  # Only publish if finger is straight
+            self._not_straight_count += 1
+            if self._not_straight_count >= self._NOT_STRAIGHT_RESET:
+                # Sustained non-pointing — reset filters and clear display
+                self.filter_u.reset()
+                self.filter_v.reset()
+                self._last_valid_uv_t = None
+                if self._was_valid:
+                    clear_msg = PointingTarget()
+                    clear_msg.header.stamp = msg.header.stamp
+                    clear_msg.is_valid = False
+                    self.target_pub.publish(clear_msg)
+                    self._was_valid = False
+            return
+
+        self._not_straight_count = 0  # back to straight — cancel any pending reset
 
         if self.calibration is None or not self.calibration.is_calibrated:
             rospy.logwarn_once("Calibration not yet received")
             return
         
         # Extract data
-        knuckle_3d = np.array([msg.knuckle_3d.x, msg.knuckle_3d.y, msg.knuckle_3d.z])
+        # Ray origin: use the most distal joint finger_analysis could find (TIP→DIP→PIP).
+        # finger_analysis populates tip_3d with the best available distal joint; z > 0
+        # means a joint was found.  Using the distal joint instead of MCP (knuckle_3d)
+        # reduces the ray-origin-to-plane distance by ~10-15 cm, which cuts the
+        # angular amplification of direction errors and reduces the "near me" bias.
+        if msg.tip_3d.z > 0.0:
+            ray_origin = np.array([msg.tip_3d.x, msg.tip_3d.y, msg.tip_3d.z])
+        else:
+            ray_origin = np.array([msg.knuckle_3d.x, msg.knuckle_3d.y, msg.knuckle_3d.z])
         direction = np.array([msg.direction_3d.x, msg.direction_3d.y, msg.direction_3d.z])
-        
+
         # Plane data
         plane_normal = np.array([
             self.calibration.plane_normal.x,
@@ -203,7 +253,7 @@ class PointingLocalizationNode:
         ])
         
         # Calculate ray-plane intersection
-        intersection_3d = self.ray_plane_intersection(knuckle_3d, direction, plane_normal, plane_point)
+        intersection_3d = self.ray_plane_intersection(ray_origin, direction, plane_normal, plane_point)
         
         # Create PointingTarget message
         target_msg = PointingTarget()
@@ -227,23 +277,13 @@ class PointingLocalizationNode:
                 # and would poison the OEF state — keeping the bounds check here ensures
                 # the filter state stays clean regardless of transient noisy frames.
                 if 0.0 <= x_norm <= 1.0 and 0.0 <= y_norm <= 1.0:
-                    # --- Diagnostic output (throttled to 0.5 s) ---
+                    # --- Diagnostic output (every valid frame) ---
                     if self.diagnose_pointing:
-                        now = time.time()
-                        if now - self._last_diag_time >= 0.5:
-                            self._last_diag_time = now
-                            rospy.loginfo(
-                                f"[DIAG pointing] "
-                                f"ray_origin={knuckle_3d.tolist()} "
-                                f"ray_dir={direction.tolist()} "
-                                f"intersection={intersection_3d.tolist()} "
-                                f"(u,v)=({x_norm:.4f}, {y_norm:.4f})"
-                            )
-                            diag_pt = Point()
-                            diag_pt.x = float(x_norm)
-                            diag_pt.y = float(y_norm)
-                            diag_pt.z = 0.0
-                            self.diag_pointing_pub.publish(diag_pt)
+                        diag_pt = Point()
+                        diag_pt.x = float(x_norm)
+                        diag_pt.y = float(y_norm)
+                        diag_pt.z = 0.0
+                        self.diag_pointing_pub.publish(diag_pt)
 
                     # Apply One Euro Filter (or bypass)
                     if self.bypass_filters:
@@ -251,8 +291,18 @@ class PointingLocalizationNode:
                         filtered_v = y_norm
                     else:
                         t = msg.header.stamp.to_sec()
-                        filtered_u = self.filter_u.filter(x_norm, t)
-                        filtered_v = self.filter_v.filter(y_norm, t)
+                        # Reset if the filter has a stale value from a long gap —
+                        # this prevents the large lag spike seen when UV resumes
+                        # after the intersection was briefly out of bounds.
+                        if (self._last_valid_uv_t is not None and
+                                t - self._last_valid_uv_t > self._UV_GAP_RESET_S):
+                            self.filter_u.reset()
+                            self.filter_v.reset()
+                            rospy.loginfo_throttle(0.5,
+                                f"[PL] UV gap {t - self._last_valid_uv_t:.2f}s — filter reset")
+                        self._last_valid_uv_t = t
+                        filtered_u = self.filter_u(x_norm, t)
+                        filtered_v = self.filter_v(y_norm, t)
 
                     lag = np.hypot(filtered_u - x_norm, filtered_v - y_norm)
                     rospy.loginfo_throttle(0.5,
@@ -271,7 +321,11 @@ class PointingLocalizationNode:
             target_msg.is_valid = False
         
         if target_msg.is_valid:
+            self._was_valid = True
             self.target_pub.publish(target_msg)
+        elif self._was_valid:
+            self.target_pub.publish(target_msg)
+            self._was_valid = False
     
     def spin(self):
         """Keep node alive"""

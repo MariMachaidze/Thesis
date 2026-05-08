@@ -28,22 +28,26 @@ from sensor_msgs.msg import Image
 
 from camera_calibration.msg import CalibrationData
 
-# ── Hough parameters (tuned for Sphero BOLT) ─────────────────────────────────
+# ── Hough parameters ──────────────────────────────────────────────────────────
 HOUGH_DP      = 1.2
 HOUGH_MINDIST = 40
 HOUGH_PARAM1  = 80
-DEF_PARAM2    = 30    # accumulator threshold — lower = more sensitive
-DEF_MIN_R     = 18   # px
-DEF_MAX_R     = 42   # px
+DEF_PARAM2    = 21    # accumulator threshold — lower = more sensitive
+DEF_MIN_R     = 25   # px
+DEF_MAX_R     = 40   # px
 DEF_BLUR      = 6    # Gaussian blur kernel (forced odd)
 
-# ── Tracking ──────────────────────────────────────────────────────────────────
-TRAIL_LEN = 50
-MAX_LOST  = 8
-MAX_JUMP  = 80    # px — in rectified space
+# ── CLAHE (trackbar value = clip × 10) ────────────────────────────────────────
+DEF_CLAHE_X10 = 6    # → clipLimit 0.6
 
-# ── CLAHE ─────────────────────────────────────────────────────────────────────
-_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+# ── One Euro Filter (trackbar values = cutoff × 10, beta × 100) ───────────────
+DEF_OEF_CUT   = 6    # → min_cutoff 0.6
+DEF_OEF_BETA  = 3    # → beta 0.03
+
+# ── Tracking ──────────────────────────────────────────────────────────────────
+DEF_TRAIL_LEN = 80
+DEF_MAX_LOST  = 10
+DEF_MAX_JUMP  = 120  # px — in rectified space
 
 # ── Rectified view: 1 px/mm → paper 850 mm × 600 mm ─────────────────────────
 RECT_W = 850
@@ -103,10 +107,12 @@ class SpheroDetectionNode:
 
         self.last_px    = None
         self.lost_count = 0
-        self.trail      = deque(maxlen=TRAIL_LEN)
+        self.trail      = deque(maxlen=200)
 
         self._filt_u = OneEuroFilter()
         self._filt_v = OneEuroFilter()
+        self._clahe           = cv2.createCLAHE(clipLimit=0.6, tileGridSize=(8, 8))
+        self._last_clahe_clip = 0.6
 
         self.det_pub = rospy.Publisher('/sphero/detection', Point, queue_size=1)
 
@@ -155,7 +161,7 @@ class SpheroDetectionNode:
 
     def _detect(self, rectified, p2, min_r, max_r, blur_k):
         gray     = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY)
-        enhanced = _clahe.apply(gray)
+        enhanced = self._clahe.apply(gray)
         k        = max(3, blur_k | 1)
         blur     = cv2.GaussianBlur(enhanced, (k, k), 0)
         circles  = cv2.HoughCircles(
@@ -169,7 +175,7 @@ class SpheroDetectionNode:
         return [(int(cx_r), int(cy_r), int(r))
                 for cx_r, cy_r, r in np.round(circles[0]).astype(int)]
 
-    def _pick_best(self, candidates):
+    def _pick_best(self, candidates, max_jump):
         if not candidates:
             return None
         if self.last_px is None:
@@ -178,7 +184,7 @@ class SpheroDetectionNode:
         best, bd = None, float('inf')
         for cx, cy, r in candidates:
             d = np.hypot(cx - lx, cy - ly)
-            if d < bd and d < MAX_JUMP:
+            if d < bd and d < max_jump:
                 bd, best = d, (cx, cy, r)
         return best if best is not None else candidates[0]
 
@@ -193,17 +199,22 @@ class SpheroDetectionNode:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def spin(self):
-        # WIN    = "Sphero Detection  [Q=quit]"
-        # WIN_TB = "Hough Controls"
-
-        # cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-        # cv2.resizeWindow(WIN, RECT_W, RECT_H)
-        # cv2.namedWindow(WIN_TB, cv2.WINDOW_NORMAL)
-
-        # cv2.createTrackbar("Sensitivity (p2)\nlower=more", WIN_TB, DEF_PARAM2, 80,  _nothing)
-        # cv2.createTrackbar("Min radius (px)",              WIN_TB, DEF_MIN_R,  100, _nothing)
-        # cv2.createTrackbar("Max radius (px)",              WIN_TB, DEF_MAX_R,  200, _nothing)
-        # cv2.createTrackbar("Blur kernel (px)",             WIN_TB, DEF_BLUR,   15,  _nothing)
+        WIN_TB = "Hough Controls"
+        cv2.namedWindow(WIN_TB, cv2.WINDOW_NORMAL)
+        # ── Hough ─────────────────────────────────────────────────────────────
+        cv2.createTrackbar("p2 (lower=more)",  WIN_TB, DEF_PARAM2,    80,  _nothing)
+        cv2.createTrackbar("Min radius (px)",  WIN_TB, DEF_MIN_R,     100, _nothing)
+        cv2.createTrackbar("Max radius (px)",  WIN_TB, DEF_MAX_R,     200, _nothing)
+        cv2.createTrackbar("Blur kernel (px)", WIN_TB, DEF_BLUR,      15,  _nothing)
+        # ── CLAHE ─────────────────────────────────────────────────────────────
+        cv2.createTrackbar("CLAHE clip x10",   WIN_TB, DEF_CLAHE_X10, 50,  _nothing)
+        # ── One Euro Filter ───────────────────────────────────────────────────
+        cv2.createTrackbar("OEF cutoff x10",   WIN_TB, DEF_OEF_CUT,  30,  _nothing)
+        cv2.createTrackbar("OEF beta x100",    WIN_TB, DEF_OEF_BETA, 50,  _nothing)
+        # ── Tracking ──────────────────────────────────────────────────────────
+        cv2.createTrackbar("Max jump (px)",    WIN_TB, DEF_MAX_JUMP,  300, _nothing)
+        cv2.createTrackbar("Max lost (frm)",   WIN_TB, DEF_MAX_LOST,  30,  _nothing)
+        cv2.createTrackbar("Trail length",     WIN_TB, DEF_TRAIL_LEN, 200, _nothing)
 
         rate = rospy.Rate(30)
 
@@ -213,19 +224,37 @@ class SpheroDetectionNode:
                 H_rect = self.H_rect
 
             if frame is None or H_rect is None:
-                # if cv2.waitKey(1) & 0xFF == ord('q'):
-                #     break
+                cv2.waitKey(1)
                 rate.sleep()
                 continue
 
-            # p2     = cv2.getTrackbarPos("Sensitivity (p2)\nlower=more", WIN_TB)
-            # min_r  = cv2.getTrackbarPos("Min radius (px)",              WIN_TB)
-            # max_r  = cv2.getTrackbarPos("Max radius (px)",              WIN_TB)
-            # blur_k = cv2.getTrackbarPos("Blur kernel (px)",             WIN_TB)
+            p2       = cv2.getTrackbarPos("p2 (lower=more)",  WIN_TB)
+            min_r    = cv2.getTrackbarPos("Min radius (px)",  WIN_TB)
+            max_r    = cv2.getTrackbarPos("Max radius (px)",  WIN_TB)
+            blur_k   = cv2.getTrackbarPos("Blur kernel (px)", WIN_TB)
+            clahe_x  = cv2.getTrackbarPos("CLAHE clip x10",   WIN_TB)
+            oef_cut  = cv2.getTrackbarPos("OEF cutoff x10",   WIN_TB)
+            oef_b    = cv2.getTrackbarPos("OEF beta x100",    WIN_TB)
+            max_jump = max(1, cv2.getTrackbarPos("Max jump (px)",  WIN_TB))
+            max_lost = max(1, cv2.getTrackbarPos("Max lost (frm)", WIN_TB))
+            trail_n  = max(1, cv2.getTrackbarPos("Trail length",   WIN_TB))
+
+            clahe_clip     = max(0.1, clahe_x / 10.0)
+            oef_min_cutoff = max(0.01, oef_cut / 10.0)
+            oef_beta       = max(0.001, oef_b / 100.0)
+
+            if clahe_clip != self._last_clahe_clip:
+                self._clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(8, 8))
+                self._last_clahe_clip = clahe_clip
+
+            self._filt_u._min_cutoff = oef_min_cutoff
+            self._filt_u._beta       = oef_beta
+            self._filt_v._min_cutoff = oef_min_cutoff
+            self._filt_v._beta       = oef_beta
 
             rectified  = cv2.warpPerspective(frame, H_rect, (RECT_W, RECT_H))
-            candidates = self._detect(rectified, DEF_PARAM2, DEF_MIN_R, DEF_MAX_R, DEF_BLUR)
-            detected   = self._pick_best(candidates)
+            candidates = self._detect(rectified, p2, min_r, max_r, blur_k)
+            detected   = self._pick_best(candidates, max_jump)
 
             u_out = v_out = None
 
@@ -234,6 +263,8 @@ class SpheroDetectionNode:
                 self.last_px    = (cx, cy)
                 self.lost_count = 0
                 self.trail.append((cx, cy))
+                while len(self.trail) > trail_n:
+                    self.trail.popleft()
 
                 u_raw = float(np.clip(cx / RECT_W, 0.0, 1.0))
                 v_raw = float(np.clip(cy / RECT_H, 0.0, 1.0))
@@ -241,13 +272,14 @@ class SpheroDetectionNode:
                 v_out = self._filt_v(v_raw)
 
                 self.det_pub.publish(Point(x=u_out, y=v_out, z=float(r)))
-                # rospy.loginfo_throttle(0.5, "Sphero u=%.3f v=%.3f r=%dpx", u_out, v_out, r)
             else:
                 self.lost_count += 1
-                if self.lost_count > MAX_LOST:
+                if self.lost_count > max_lost:
                     self.last_px = None
                     if self.trail:
                         self.trail.popleft()
+
+            cv2.waitKey(1)
 
             # ── Display (commented out — navigate node shows its own window) ──────
             # disp = cv2.flip(rectified, 0)

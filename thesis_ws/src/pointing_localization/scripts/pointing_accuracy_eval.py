@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Pointing accuracy evaluation — gesture-triggered recording.
+Pointing accuracy evaluation — keyboard-triggered recording.
 Order: height (0 → 25 → 50 cm) x target (1→5) x 5 trials.
 
 Workflow per trial:
   1. Script shows which target and trial to do.
-  2. Extend index finger and point at the target — recording starts.
-  3. Hold as long as you like, then OPEN hand — trial ends.
+  2. Point at the target, then press ENTER to start recording.
+  3. Hold as long as you like, then press ENTER again to stop.
   4. Results printed → next trial starts automatically.
 
 Results saved to ~/Desktop/thesis/accuracy_<timestamp>.csv
@@ -17,7 +17,6 @@ import csv
 import time
 import os
 import numpy as np
-from finger_analysis.msg import FingerAnalysis
 from pointing_localization.msg import PointingTarget
 
 # Ground truth (u, v) normalized
@@ -31,26 +30,19 @@ TARGETS = {
 
 HEIGHTS      = [0, 25, 50]   # cm above paper
 N_TRIALS     = 5
-MIN_SAMPLES  = 8             # minimum samples for a valid trial after trimming
-TRIM_START   = 8             # drop first N samples — hand moving into position (~0.25 s)
-TRIM_END     = 5             # drop last  N samples — hand moving away           (~0.17 s)
+MIN_SAMPLES  = 5             # minimum samples for a valid trial
 
 
 class PointingEvaluator:
     def __init__(self):
         rospy.init_node('pointing_evaluator', anonymous=False)
-        self._is_straight = False
-        self._collecting  = False
-        self._samples     = []
+        self._collecting = False
+        self._samples    = []
 
-        rospy.Subscriber('/finger/analysis',  FingerAnalysis,  self._finger_cb)
-        rospy.Subscriber('/pointing/target',   PointingTarget,  self._target_cb)
+        rospy.Subscriber('/pointing/target', PointingTarget, self._target_cb)
         rospy.sleep(0.5)   # let subscribers connect
 
     # ------------------------------------------------------------------
-    def _finger_cb(self, msg):
-        self._is_straight = msg.is_straight
-
     def _target_cb(self, msg):
         if self._collecting and msg.is_valid:
             latency_ms = (rospy.Time.now() - msg.header.stamp).to_sec() * 1000.0
@@ -59,37 +51,24 @@ class PointingEvaluator:
     # ------------------------------------------------------------------
     def _run_trial(self):
         """
-        Block until one complete point-then-open gesture is captured.
+        Block until the user starts and stops a recording with ENTER.
         Returns the collected samples list.
         """
         while not rospy.is_shutdown():
-            print("  → Extend finger and point at the target ...")
+            input("  → Point at the target, then press ENTER to start recording ...")
 
-            # Wait for finger to become straight
-            while not rospy.is_shutdown() and not self._is_straight:
-                rospy.sleep(0.01)
-
-            # Finger is straight — start collecting
             self._samples    = []
             self._collecting = True
-            print("  RECORDING ... open hand to stop", end='', flush=True)
+            input("  RECORDING — press ENTER to stop ...")
 
-            # Collect while finger stays straight
-            while not rospy.is_shutdown() and self._is_straight:
-                rospy.sleep(0.01)
-
-            # Finger opened — stop collecting
             self._collecting = False
             samples = list(self._samples)
+            print(f"  ({len(samples)} samples collected)")
 
-            # Trim edges — discard hand moving in/out
-            trimmed = samples[TRIM_START : len(samples) - TRIM_END if TRIM_END else None]
-            print(f"  ({len(samples)} raw → {len(trimmed)} after trimming edges)")
+            if len(samples) >= MIN_SAMPLES:
+                return samples
 
-            if len(trimmed) >= MIN_SAMPLES:
-                return trimmed
-
-            print(f"  Too short after trimming (need {MIN_SAMPLES}+), try again.")
+            print(f"  Too short (need {MIN_SAMPLES}+), try again.")
 
         return []
 
@@ -129,7 +108,6 @@ class PointingEvaluator:
                         print(f"  Height {height} cm  |  u_gt={u_gt:.3f}  v_gt={v_gt:.3f}")
 
                         samples = self._run_trial()
-
                         if not samples:
                             w.writerow([target_id, height, trial,
                                         u_gt, v_gt,

@@ -67,9 +67,6 @@ class VisualizationNode:
         self._warp_M_inv       = None
         self._warp_calib_stamp = None
 
-        # Diagnostic publisher
-        self.diag_raw_pub = rospy.Publisher('/diag/straightness_raw', Float32, queue_size=1)
-
         cv2.namedWindow('Hand Detection', cv2.WINDOW_NORMAL)
         cv2.namedWindow('Top-Down View',  cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Top-Down View', self.WARP_W, self.WARP_H)
@@ -300,16 +297,31 @@ class VisualizationNode:
     # ================================================================
     def draw_topdown_view(self, warped):
         W, H = self.WARP_W, self.WARP_H
+        # 5 cm border = 50 px (1 px = 1 mm)
+        BX, BY = 50, 50
 
-        # Grid: 10 cm spacing (1 px = 1 mm → 100 px = 10 cm)
-        for x in range(0, W + 1, 100):
-            cv2.line(warped, (x, 0), (x, H), (70, 70, 70), 1)
-        for y in range(0, H + 1, 100):
-            cv2.line(warped, (0, y), (W, y), (70, 70, 70), 1)
+        # Grid lines at 10 cm intervals, inside the valid area only
+        for x in range(BX, W - BX + 1, 100):
+            cv2.line(warped, (x, BY), (x, H - BY), (0, 180, 180), 1)
+        for y in range(BY, H - BY + 1, 100):
+            cv2.line(warped, (BX, y), (W - BX, y), (0, 180, 180), 1)
+
+        # Yellow border rectangle marking the 5 cm exclusion zone
+        cv2.rectangle(warped, (BX, BY), (W - BX, H - BY), (0, 220, 220), 2)
+
+        # Raw (pre-filter) intersection — yellow dot, only when diagnose_pointing=true
+        if (self.diagnose_pointing and self.finger_data and self.finger_data.is_straight
+                and self.diag_pointing_raw is not None):
+            rx = self._vx(float(np.clip(self.diag_pointing_raw.x, 0.0, 1.0)))
+            ry = self._vy(float(np.clip(self.diag_pointing_raw.y, 0.0, 1.0)))
+            cv2.circle(warped, (rx, ry), 6, (0, 220, 255), -1)
 
         if self.target_data and self.target_data.is_valid:
-            _u  = float(np.clip(self.target_data.u_normalized, 0.0, 1.0))
-            _v  = float(np.clip(self.target_data.v_normalized, 0.0, 1.0))
+            # Clamp to valid area (5 cm from each edge in normalised coords)
+            BORDER_U = BX / W
+            BORDER_V = BY / H
+            _u = float(np.clip(self.target_data.u_normalized, BORDER_U, 1.0 - BORDER_U))
+            _v = float(np.clip(self.target_data.v_normalized, BORDER_V, 1.0 - BORDER_V))
             tx  = self._vx(_u)
             ty  = self._vy(_v)
             arm = 20
@@ -317,7 +329,7 @@ class VisualizationNode:
             cv2.line(warped,   (tx, ty - arm), (tx, ty + arm), (0, 255, 0), 2)
             cv2.circle(warped, (tx, ty), 10, (0, 255, 0), 2)
             cv2.putText(warped,
-                        f"Target ({self.target_data.u_normalized:.2f},{self.target_data.v_normalized:.2f})",
+                        f"({self.target_data.u_normalized:.2f},{self.target_data.v_normalized:.2f})",
                         (tx + 14, ty - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
 
@@ -349,9 +361,6 @@ class VisualizationNode:
                     topdown_view = warped.copy()
                     self.draw_topdown_view(topdown_view)
                     cv2.imshow('Top-Down View', topdown_view)
-
-            if self.diagnose_hand and self.raw_straightness is not None:
-                self.diag_raw_pub.publish(Float32(data=self.raw_straightness))
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break

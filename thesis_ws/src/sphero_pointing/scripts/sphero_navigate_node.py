@@ -20,6 +20,7 @@ Keys (display window): Q = quit
 import math
 import threading
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -27,6 +28,7 @@ import rospy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import Image
+from std_msgs.msg import Float64
 from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
 
@@ -34,21 +36,44 @@ from camera_calibration.msg import CalibrationData
 from pointing_localization.msg import PointingTarget
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-SPEED           = 50
-UPDATE_INTERVAL = 0.3
-UPDATE_NEAR     = 0.1
-NEAR_DIST_CM    = 20.0
-SLOW_DIST_CM    = 20.0
-MIN_SPEED       = 25
-HOVER_STOP_CM   = 3.0
-HOVER_RESUME_CM = 9.0
-COAST_FACTOR    = 0.28
-STUCK_TIMEOUT_S = 2.5   # s  — force hover if pos hasn't moved for this long
-STUCK_MOVE_CM   = 1.5   # cm — minimum displacement to reset stuck timer
+SPEED             = 50
+UPDATE_INTERVAL   = 0.15  # roll command duration (s) — short so heading updates quickly
+ARRIVAL_RADIUS_CM = 3.0   # cm — pass-through radius; robot switches to next waypoint here
+STUCK_TIMEOUT_S   = 2.5   # s  — skip waypoint if pos hasn't moved for this long
+STUCK_MOVE_CM     = 1.5   # cm — minimum displacement to reset stuck timer
+QUEUE_DWELL     = 3     # 10 Hz samples (300 ms) finger must stay in same square to enqueue
 PAPER_X_CM      = 85.0
 PAPER_Y_CM      = 60.0
+BORDER_CM       = 5.0
+SQUARE_CM       = 10.0
 RECT_W          = 850
 RECT_H          = 600
+
+
+def _build_grid():
+    centers = []
+    x = BORDER_CM + SQUARE_CM / 2.0
+    while x <= PAPER_X_CM - BORDER_CM - SQUARE_CM / 2.0 + 1e-9:
+        y = BORDER_CM + SQUARE_CM / 2.0
+        while y <= PAPER_Y_CM - BORDER_CM - SQUARE_CM / 2.0 + 1e-9:
+            centers.append((round(x, 1), round(y, 1)))
+            y += SQUARE_CM
+        x += SQUARE_CM
+    return centers
+
+
+GRID = _build_grid()
+
+
+def _nearest_square_uv(u, v):
+    """Map raw (u,v) to the center of the nearest grid square, returned as (u,v)."""
+    px, py = u * PAPER_X_CM, v * PAPER_Y_CM
+    best, best_d = GRID[0], float('inf')
+    for cx, cy in GRID:
+        d = math.hypot(px - cx, py - cy)
+        if d < best_d:
+            best_d, best = d, (cx, cy)
+    return (best[0] / PAPER_X_CM, best[1] / PAPER_Y_CM)
 
 STATE_AIM      = 'aim'
 STATE_TRACKING = 'tracking'
@@ -58,76 +83,89 @@ STATE_TRACKING = 'tracking'
 class Navigator:
     """Runs in a daemon thread — reads shared UV, drives Sphero."""
 
-    def __init__(self, droid, get_sphero_uv, get_target_uv, heading_offset):
+    def __init__(self, droid, get_sphero_uv, get_target_uv, heading_offset, on_arrive=None):
         self.droid          = droid
         self.get_sphero_uv  = get_sphero_uv
         self.get_target_uv  = get_target_uv
         self.heading_offset = heading_offset
         self.active         = False
-        self._hovering      = False
         self.last_heading   = None
         self.last_dist_cm   = None
         self._thread        = None
-
-    @property
-    def hovering(self):
-        return self._hovering
+        self._on_arrive     = on_arrive
 
     def start(self):
-        self.active    = True
-        self._hovering = False
-        self._thread   = threading.Thread(target=self._run, daemon=True)
+        self.active  = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self):
         self.active = False
 
     def _run(self):
-        _was_lost   = False
-        _stuck_pos  = None
+        _was_lost    = False
+        _stuck_pos   = None
         _stuck_since = None
+        _in_border   = False
+
+        BORDER_U = BORDER_CM / PAPER_X_CM
+        BORDER_V = BORDER_CM / PAPER_Y_CM
+
         while self.active and not rospy.is_shutdown():
             pos    = self.get_sphero_uv()
             target = self.get_target_uv()
 
-            if pos is None or target is None:
+            if pos is None:
                 if not _was_lost:
-                    rospy.loginfo_throttle(2, "[NAV] waiting — pos=%s target=%s",
-                                           pos is not None, target is not None)
+                    rospy.loginfo_throttle(2, "[NAV] waiting for Sphero detection…")
                     _was_lost = True
                 self.droid.set_speed(0)
                 time.sleep(0.1)
                 continue
 
             if _was_lost:
-                rospy.loginfo("[NAV] detection/target regained — resuming")
+                rospy.loginfo("[NAV] detection regained — resuming")
                 _was_lost = False
+
+            if target is None:
+                self.droid.set_speed(0)
+                time.sleep(0.1)
+                continue
+
+            # Border escape: reverse if robot drifted into exclusion zone
+            in_border_now = (pos[0] < BORDER_U or pos[0] > 1.0 - BORDER_U or
+                             pos[1] < BORDER_V or pos[1] > 1.0 - BORDER_V)
+            if in_border_now:
+                if not _in_border:
+                    rospy.logwarn("[NAV] Border zone (%.1f,%.1f)cm — reversing",
+                                  pos[0]*PAPER_X_CM, pos[1]*PAPER_Y_CM)
+                    _in_border   = True
+                    _stuck_pos   = None
+                    _stuck_since = None
+                reverse = (self.last_heading + 180) % 360 if self.last_heading is not None else 0
+                self.droid.roll(reverse, SPEED, UPDATE_INTERVAL)
+                continue
+
+            if _in_border:
+                rospy.loginfo("[NAV] Escaped border — resuming navigation")
+                _in_border = False
 
             du = target[0] - pos[0]
             dv = target[1] - pos[1]
             dist_cm = math.hypot(du * PAPER_X_CM, dv * PAPER_Y_CM)
-            self.last_dist_cm = dist_cm
-            speed = max(MIN_SPEED, int(SPEED * min(dist_cm / SLOW_DIST_CM, 1.0)))
 
-            if self._hovering:
-                if dist_cm > HOVER_RESUME_CM:
-                    self._hovering = False
-                    _stuck_pos   = None
-                    _stuck_since = None
-                    rospy.loginfo("[NAV] HOVER → NAVIGATE  dist=%.1fcm", dist_cm)
-                else:
-                    time.sleep(0.1)
-                    continue
-            elif dist_cm < max(HOVER_STOP_CM, speed * COAST_FACTOR):
-                self.droid.set_speed(0)
-                self._hovering = True
-                rospy.loginfo("[NAV] NAVIGATE → HOVER  pos=(%.1f,%.1f)cm  target=(%.1f,%.1f)cm  dist=%.1fcm",
-                              pos[0]*PAPER_X_CM, pos[1]*PAPER_Y_CM,
-                              target[0]*PAPER_X_CM, target[1]*PAPER_Y_CM, dist_cm)
-                time.sleep(0.1)
+            # Waypoint pass-through: robot sweeps through target, no stopping
+            if dist_cm < ARRIVAL_RADIUS_CM:
+                rospy.loginfo("[NAV] WAYPOINT  dist=%.1fcm  target=(%.1f,%.1f)cm",
+                              dist_cm, target[0]*PAPER_X_CM, target[1]*PAPER_Y_CM)
+                if self._on_arrive:
+                    self._on_arrive()
+                _stuck_pos   = None
+                _stuck_since = None
+                time.sleep(0.05)
                 continue
 
-            # Stuck detection: if position hasn't changed, force hover
+            # Stuck detection: skip waypoint if not making progress
             if _stuck_pos is None:
                 _stuck_pos   = pos
                 _stuck_since = time.time()
@@ -138,28 +176,20 @@ class Navigator:
                     _stuck_pos   = pos
                     _stuck_since = time.time()
                 elif time.time() - _stuck_since > STUCK_TIMEOUT_S:
-                    self.droid.set_speed(0)
-                    self._hovering = True
-                    _stuck_pos   = None
-                    _stuck_since = None
-                    rospy.loginfo("[NAV] STUCK → HOVER  pos=(%.1f,%.1f)cm  target=(%.1f,%.1f)cm  dist=%.1fcm",
+                    rospy.loginfo("[NAV] STUCK → skip  pos=(%.1f,%.1f)cm  target=(%.1f,%.1f)cm  dist=%.1fcm",
                                   pos[0]*PAPER_X_CM, pos[1]*PAPER_Y_CM,
                                   target[0]*PAPER_X_CM, target[1]*PAPER_Y_CM, dist_cm)
+                    if self._on_arrive:
+                        self._on_arrive()
+                    _stuck_pos   = None
+                    _stuck_since = None
                     time.sleep(0.1)
                     continue
 
-            # heading: atan2(du, dv) matches our aim convention
-            # (tail toward user → heading=0 = toward far edge = large v = positive dv)
             paper_angle = math.degrees(math.atan2(du, dv)) % 360
             heading     = int(round(self.heading_offset + paper_angle)) % 360
-            interval    = UPDATE_NEAR if dist_cm < NEAR_DIST_CM else UPDATE_INTERVAL
             self.last_heading = heading
-            rospy.loginfo_throttle(0.3,
-                "[NAV] pos=(%.3f,%.3f) target=(%.3f,%.3f) du=%+.3f dv=%+.3f "
-                "dist=%.1fcm angle=%.1f° hdg=%d° spd=%d dt=%.2fs",
-                pos[0], pos[1], target[0], target[1], du, dv,
-                dist_cm, paper_angle, heading, speed, interval)
-            self.droid.roll(heading, speed, interval)
+            self.droid.roll(heading, SPEED, UPDATE_INTERVAL)
 
         self.droid.set_speed(0)
 
@@ -171,7 +201,7 @@ def disp_pt(cx, cy):
 def uv_to_disp(u, v):
     return disp_pt(int(u * RECT_W), int(v * RECT_H))
 
-def draw_grid(img, step_px=100, color=(55, 55, 55)):
+def draw_grid(img, step_px=100, color=(110, 110, 110)):
     for rx in range(step_px, RECT_W, step_px):
         cv2.line(img, (rx, 0), (rx, RECT_H), color, 1)
         cv2.putText(img, f"{rx//10}cm", (rx+2, RECT_H-4),
@@ -218,12 +248,29 @@ class SpheroNavigateNode:
         self.bridge = CvBridge()
         self.lock   = threading.Lock()
 
-        self._frame      = None
-        self._H_rect     = None
-        self._sphero_uv  = None
-        self._sphero_r   = 0
-        self._target_uv  = None   # last valid pointing target
-        self._target_locked = False  # True while navigating; blocks new pointing
+        self._frame           = None
+        self._H_rect          = None
+        self._sphero_uv       = None
+        self._sphero_r        = 0
+        self._sphero_last_det = 0.0   # time.time() of last valid detection message
+
+        # Live pointing (updated every message)
+        self._current_pointing_uv = None   # raw border-clamped (u,v)
+        self._current_pointing_sq = None   # nearest grid square — used only for change detection
+
+        # Navigation queue: robot drives to each raw (u,v) in order
+        self._target_queue     = deque()   # pending raw positions
+        self._last_queued_sq   = None      # last grid square enqueued (dedup)
+        self._target_uv        = None      # currently active navigation target (raw)
+        self._target_accept_time = None
+
+        # Dwell tracking: finger must stay in same square for QUEUE_DWELL samples
+        self._dwell_sq         = None      # square currently being dwelt in
+        self._dwell_count      = 0         # consecutive samples in _dwell_sq
+
+        rospy.Timer(rospy.Duration(1.0/60.0), self._queue_sample_cb)  # 60 Hz
+
+        self._travel_pub = rospy.Publisher('/sphero/travel_time_s', Float64, queue_size=10)
 
         rospy.Subscriber('/d435i/rgb/image_raw',  Image,
                          self._image_cb,    queue_size=1)
@@ -264,28 +311,86 @@ class SpheroNavigateNode:
 
     def _detection_cb(self, msg):
         with self.lock:
-            self._sphero_uv = (float(msg.x), float(msg.y))
-            self._sphero_r  = int(msg.z)
+            self._sphero_uv       = (float(msg.x), float(msg.y))
+            self._sphero_r        = int(msg.z)
+            self._sphero_last_det = time.time()
 
     def _target_cb(self, msg):
-        if msg.is_valid:
-            with self.lock:
-                if self._target_locked:
-                    return
-                self._target_uv = (float(np.clip(msg.u_normalized, 0, 1)),
-                                   float(np.clip(msg.v_normalized, 0, 1)))
-                rospy.loginfo_throttle(1.0, "[NAV] New target accepted: (%.3f, %.3f)",
-                                       *self._target_uv)
+        if not msg.is_valid:
+            return
+        border_u = BORDER_CM / PAPER_X_CM
+        border_v = BORDER_CM / PAPER_Y_CM
+        raw_u = float(np.clip(msg.u_normalized, border_u, 1.0 - border_u))
+        raw_v = float(np.clip(msg.v_normalized, border_v, 1.0 - border_v))
+        sq    = _nearest_square_uv(raw_u, raw_v)   # for change detection only
+        with self.lock:
+            self._current_pointing_uv = (raw_u, raw_v)
+            self._current_pointing_sq = sq
+
+    def _queue_sample_cb(self, event):
+        """10 Hz — enqueue if finger has dwelt in a new grid square for QUEUE_DWELL samples."""
+        with self.lock:
+            if self._current_pointing_uv is None:
+                return
+            sq     = self._current_pointing_sq
+            raw_uv = self._current_pointing_uv
+
+            # Dwell counter: reset on square change
+            if sq != self._dwell_sq:
+                self._dwell_sq    = sq
+                self._dwell_count = 1
+            else:
+                self._dwell_count += 1
+
+            # Only enqueue exactly when dwell threshold is reached
+            if self._dwell_count != QUEUE_DWELL:
+                return
+            if sq == self._last_queued_sq:
+                return   # same square as last queued — don't enqueue again
+
+            self._target_queue.append(raw_uv)
+            self._last_queued_sq = sq
+            # If robot is idle, activate immediately
+            if self._target_uv is None:
+                self._target_uv        = self._target_queue.popleft()
+                self._target_accept_time = time.time()
+            q_len = len(self._target_queue)
+        rospy.loginfo("[QUEUE] enqueued (%.1f,%.1f)cm  sq=(%.0f,%.0f)cm  pending=%d",
+                      raw_uv[0] * PAPER_X_CM, raw_uv[1] * PAPER_Y_CM,
+                      sq[0] * PAPER_X_CM, sq[1] * PAPER_Y_CM, q_len)
 
     # ── Shared-state accessors for Navigator ──────────────────────────────────
 
     def _get_sphero_uv(self):
         with self.lock:
+            if self._sphero_uv is None:
+                return None
+            if time.time() - self._sphero_last_det > 1.0:
+                return None   # stale — Sphero out of camera frame
             return self._sphero_uv
 
     def _get_target_uv(self):
         with self.lock:
             return self._target_uv
+
+    def _on_arrive(self):
+        with self.lock:
+            t0 = self._target_accept_time
+            if self._target_queue:
+                self._target_uv        = self._target_queue.popleft()
+                self._target_accept_time = time.time()
+                rospy.loginfo("[QUEUE] next target (%.1f,%.1f)cm  remaining=%d",
+                              self._target_uv[0] * PAPER_X_CM,
+                              self._target_uv[1] * PAPER_Y_CM,
+                              len(self._target_queue))
+            else:
+                self._target_uv        = None
+                self._target_accept_time = None
+                rospy.loginfo("[QUEUE] empty — robot idle")
+        if t0 is not None:
+            elapsed = time.time() - t0
+            self._travel_pub.publish(Float64(data=elapsed))
+            rospy.loginfo("[TIMER] travel %.2fs", elapsed)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -301,23 +406,14 @@ class SpheroNavigateNode:
         rate = rospy.Rate(30)
 
         while not rospy.is_shutdown():
-            # Update target lock: locked only when navigating AND a target already exists
-            # (if no target yet, always accept so the first pointing isn't blocked)
-            if nav is not None:
-                with self.lock:
-                    self._target_locked = (nav.active and not nav.hovering
-                                           and self._target_uv is not None)
-            else:
-                with self.lock:
-                    self._target_locked = False
-
             with self.lock:
-                frame   = self._frame.copy() if self._frame is not None else None
-                H_rect  = self._H_rect
-                suv     = self._sphero_uv
-                sr      = self._sphero_r
-                tuv     = self._target_uv
-                locked  = self._target_locked
+                frame  = self._frame.copy() if self._frame is not None else None
+                H_rect = self._H_rect
+                suv    = self._sphero_uv
+                sr     = self._sphero_r
+                tuv    = self._target_uv
+                puv    = self._current_pointing_uv
+                q_len  = len(self._target_queue)
 
             # ── Build display ───────────────────────────────────────────────
             if frame is not None and H_rect is not None:
@@ -336,14 +432,18 @@ class SpheroNavigateNode:
 
             if suv is not None:
                 draw_sphero(disp, suv, sr)
-            if tuv is not None and state == STATE_TRACKING:
-                target_col = (80, 80, 80) if locked else (0, 60, 255)
-                dp_t = uv_to_disp(*tuv)
-                cv2.drawMarker(disp, dp_t, target_col, cv2.MARKER_CROSS, 24, 2)
-                cv2.circle(disp, dp_t, 18, target_col, 1)
-                if suv is not None:
-                    line_col = (80, 80, 80) if locked else (255, 255, 0)
-                    cv2.line(disp, uv_to_disp(*suv), dp_t, line_col, 1)
+            if state == STATE_TRACKING:
+                # Live pointing crosshair (where finger is now)
+                if puv is not None:
+                    dp_p = uv_to_disp(*puv)
+                    cv2.drawMarker(disp, dp_p, (0, 220, 255), cv2.MARKER_CROSS, 16, 1)
+                # Active navigation target
+                if tuv is not None:
+                    dp_t = uv_to_disp(*tuv)
+                    cv2.drawMarker(disp, dp_t, (0, 60, 255), cv2.MARKER_CROSS, 24, 2)
+                    cv2.circle(disp, dp_t, 18, (0, 60, 255), 1)
+                    if suv is not None:
+                        cv2.line(disp, uv_to_disp(*suv), dp_t, (0, 200, 255), 1)
 
             # ── State overlays ───────────────────────────────────────────────
             if state == STATE_AIM:
@@ -356,18 +456,18 @@ class SpheroNavigateNode:
                     ])
 
             elif state == STATE_TRACKING:
-                if tuv is None:
+                if tuv is None and puv is None:
                     draw_overlay(disp, ["Waiting for pointing target…"])
                 elif nav is not None:
                     d = nav.last_dist_cm
                     h = nav.last_heading
-                    if nav.hovering:
-                        col  = (0, 255, 0)
-                        info = f"ARRIVED  dist={d:.1f}cm — point to new target" if d is not None else "ARRIVED"
+                    if tuv is None:
+                        col  = (180, 180, 180)
+                        info = f"IDLE  queue={q_len} — point to a new location"
                     else:
                         col  = (0, 200, 255)
-                        info = (f"NAVIGATING  dist={d:.1f}cm  hdg={h}deg  [pointing locked]"
-                                if d is not None else "NAVIGATING… [pointing locked]")
+                        info = (f"NAVIGATING  dist={d:.1f}cm  hdg={h}deg  queue={q_len}"
+                                if d is not None else f"NAVIGATING…  queue={q_len}")
                     cv2.putText(disp, info, (8, RECT_H-8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
 
@@ -392,9 +492,18 @@ class SpheroNavigateNode:
                     droid.set_back_led(0)
                     aim_phase = 0
                     state = STATE_TRACKING
-                    rospy.loginfo("Aim reset. heading=0 locked. Starting navigation.")
+                    with self.lock:
+                        self._target_queue.clear()
+                        self._target_uv           = None
+                        self._target_accept_time  = None
+                        self._last_queued_sq      = None
+                        self._current_pointing_uv = None
+                        self._current_pointing_sq = None
+                        self._dwell_sq            = None
+                        self._dwell_count         = 0
+                    rospy.loginfo("Aim reset. Queue cleared. Starting navigation.")
                     nav = Navigator(droid, self._get_sphero_uv, self._get_target_uv,
-                                    self.heading_offset)
+                                    self.heading_offset, on_arrive=self._on_arrive)
                     nav.start()
 
             rate.sleep()

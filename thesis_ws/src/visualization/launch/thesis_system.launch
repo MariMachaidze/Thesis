@@ -26,20 +26,33 @@
   <!-- Hand Detection -->
   <node pkg="hand_detection" type="hand_detection_node.py" name="hand_detection" output="screen">
     <param name="detection_confidence" value="0.7"/>
-    <param name="tracking_confidence" value="0.5"/>
+    <param name="tracking_confidence" value="0.3"/>
   </node>
   
   <!-- Finger Analysis -->
   <node pkg="finger_analysis" type="finger_analysis_node.py" name="finger_analysis" output="screen">
-    <param name="straightness_threshold" value="0.7"/>
+    <!-- Line-fit metric gives lower scores than old cosine metric.          -->
+    <!-- Observed OEF range: 0.50-0.73 when pointing, 0.36-0.45 when bent. -->
+    <!-- on=0.58 activates when clearly extended; off=0.40 drops when bent. -->
+    <param name="straight_on_threshold"  value="0.58"/>
+    <param name="straight_off_threshold" value="0.40"/>
+    <param name="hand_loss_reset_frames" value="20"/>
     <param name="fx" value="901.473"/>
     <param name="fy" value="899.637"/>
     <param name="cx" value="642.351"/>
     <param name="cy" value="349.990"/>
-    <!-- One Euro Filter for landmark smoothing (knuckle + direction) -->
-    <param name="filter_min_cutoff" value="1.0"/>
-    <param name="filter_beta" value="0.007"/>
-    <param name="filter_d_cutoff" value="1.0"/>
+    <!-- Depth sync gate: D435i RGB and depth clocks have ~40-70ms hardware offset. -->
+    <!-- 30ms rejected ~35% of frames. 80ms passes nearly all while still catching -->
+    <!-- truly stale frames (e.g. depth stream paused for >80ms).                  -->
+    <param name="max_sync_delta_ms"  value="80"/>
+    <!-- Vector EMA on 3-D joint positions (replaces per-axis Median) -->
+    <!-- alpha=0.5: 90% step response in ~3 frames (100ms). gate=0.05m: spike clamp -->
+    <param name="joint_ema_alpha"    value="0.5"/>
+    <param name="joint_ema_gate_m"   value="0.05"/>
+    <!-- EMA on the SVD direction unit vector — kills frame-to-frame angular jitter -->
+    <param name="dir_ema_alpha"      value="0.4"/>
+    <!-- Line-fit straightness decay: k=10 → bent 30% scores 0.61 (below 0.65 gate) -->
+    <param name="straightness_k"     value="10.0"/>
     <!-- One Euro Filter for straightness score -->
     <param name="one_euro_min_cutoff" value="1.0"/>
     <param name="one_euro_beta"       value="0.007"/>
@@ -48,9 +61,14 @@
   
   <!-- Pointing Localization -->
   <node pkg="pointing_localization" type="pointing_localization_node.py" name="pointing_localization" output="screen">
-    <param name="filter_min_cutoff" value="0.1"/>
-    <param name="filter_beta" value="0.8"/>
-    <param name="filter_d_cutoff" value="1.0"/>
+    <!-- Pointing UV filter: min_cutoff controls jitter when stationary.           -->
+    <!-- 2.0 was too responsive — pointer jittered ±2-3cm when held still.          -->
+    <!-- 1.0 halves the noise floor; beta=0.35 keeps fast sweeps responsive.        -->
+    <param name="filter_min_cutoff"   value="1.0"/>
+    <param name="filter_beta"         value="0.35"/>
+    <param name="filter_d_cutoff"     value="1.0"/>
+    <param name="filter_min_cutoff_v" value="1.0"/>
+    <param name="filter_beta_v"       value="0.35"/>
     <!-- Diagnostic: set true to print ray/intersection/uv every 0.5 s and publish /diag/pointing_raw -->
     <param name="diagnose_pointing" value="true"/>
     <!-- Bypass: set true to skip One Euro Filter and publish raw intersection uv directly -->
@@ -70,9 +88,22 @@
   </node>
 
   <!-- Sphero Detection (camera-based position tracking) -->
+  <!-- sphero_detection_node.py: original detection node (trackbar-tunable Hough, frequency-based OEF) -->
+  <!--
   <node pkg="sphero_detection" type="sphero_detection_node.py" name="sphero_detection" output="screen"/>
+  -->
 
-  <!-- Sphero Navigate Controller -->
+  <!-- sphero_path_detection_node.py: detection using SpheroTracker (time-based OEF, history-based stable_uv) -->
+  <node pkg="sphero_detection" type="sphero_path_detection_node.py" name="sphero_detection" output="screen">
+    <param name="fx" value="901.473"/>
+    <param name="fy" value="899.637"/>
+    <param name="cx" value="642.351"/>
+    <param name="cy" value="349.990"/>
+  </node>
+
+  <!-- Sphero Navigate Controller (pointing-target waypoints + pure pursuit) -->
+  <!-- sphero_navigate_node.py: original controller — direct point-and-go toward each pointing target -->
+  <!--
   <node pkg="sphero_pointing" type="sphero_navigate_node.py" name="sphero_navigate" output="screen" launch-prefix="bash -c 'sleep 3; exec $0 $@' ">
     <param name="sphero_name"     value="SB-FD03"/>
     <param name="heading_offset"  value="0.0"/>
@@ -81,6 +112,26 @@
     <param name="cx"              value="642.351"/>
     <param name="cy"              value="349.990"/>
   </node>
+  -->
+
+  <!-- sphero_path_navigate_node.py: PCHIP path + pure pursuit + dwell-based waypoints from pointing -->
+  <node pkg="sphero_pointing" type="sphero_path_navigate_node.py" name="sphero_navigate" output="screen" launch-prefix="bash -c 'sleep 3; exec $0 $@' ">
+    <param name="sphero_name"    value="SB-FD03"/>
+    <param name="heading_offset" value="0.0"/>
+    <param name="fx"             value="901.473"/>
+    <param name="fy"             value="899.637"/>
+    <param name="cx"             value="642.351"/>
+    <param name="cy"             value="349.990"/>
+  </node>
+
+  <!-- Session recorder — bags saved to ~/Desktop/thesis/bags/ -->
+  <node pkg="rosbag" type="record" name="bag_recorder" output="log"
+        args="-o $(env HOME)/Desktop/thesis/bags/session
+              /sphero/detection
+              /pointing/target
+              /diag/pointing_raw
+              /sphero/travel_time_s
+              /finger/analysis"/>
 
   <!-- Sphero Pointing Controller (disabled — use sphero_navigate_node instead) -->
   <!--
