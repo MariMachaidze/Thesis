@@ -1,0 +1,20 @@
+Section 5.5 -- Navigation Success Rate (summary)
+======================================================================
+Success criterion       : Sphero centre entered the 10x10 cm
+                          target square after t_start
+Trials                  : 174  (deduplicated across 16 sessions)
+Arrived                 : 164
+Missed                  : 10
+Overall success rate    : 94.25 %
+
+Success rate by region:
+  Near-Left   : 100.0 %  ( 14/ 14)
+  Near-Centre :  91.4 %  ( 32/ 35)
+  Near-Right  :  84.6 %  ( 11/ 13)
+  Far-Left    :  96.4 %  ( 27/ 28)
+  Far-Centre  :  96.2 %  ( 51/ 53)
+  Far-Right   :  93.5 %  ( 29/ 31)
+
+Robot-to-target-centre distance:
+  Arrived trials        : mean 5.51 cm, SD 0.71, max 6.86
+  Missed trials         : mean 34.52 cm, SD 17.87, max 66.88

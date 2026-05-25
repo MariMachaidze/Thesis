@@ -1,0 +1,169 @@
+================================================================================
+Section 5.2 — Robot Navigation Accuracy
+Gesture-Based Teleoperation of a Sphero Mobile Robot
+================================================================================
+
+Dataset
+-------
+The analysis is based on 275 arrived trials extracted from 16 recording
+sessions stored in bags/thesis_final/. Each trial corresponds to one user
+pointing gesture that was successfully committed by the gating logic
+(t_start) together with the subsequent first continuous in-square run of
+the Sphero robot. The per-trial metric is the minimum Euclidean distance,
+in centimetres, between the robot centre and the user's pointed
+coordinate during the first in-square run that begins after t_start;
+pre-parked runs left over from a previous trial are skipped so the
+metric reflects new navigation effort. The pointed coordinate is clipped
+to the navigable workspace x in [5, 80] cm, y in [5, 55] cm.
+
+Success is operationalised at a 5 cm radius, matching the upstream
+summary file. This threshold is small enough to be perceptually
+meaningful for tabletop interaction (it is comparable to the diameter
+of the Sphero itself) and large enough to absorb the residual
+single-frame jitter introduced by the vision pipeline.
+
+--------------------------------------------------------------------------------
+1. Overall navigation accuracy
+--------------------------------------------------------------------------------
+Across all 275 arrived trials, the mean minimum in-square distance was
+3.10 cm (SD = 2.32 cm; median = 2.62 cm; min = 0.13 cm; max = 10.21 cm).
+The median is below the mean, indicating a right-skewed distribution
+in which the bulk of trials cluster close to the target and a smaller
+tail of trials accumulates several centimetres of residual error.
+
+Looking at the cumulative breakdown:
+
+    Within 2 cm : 40.7 %   (112 / 275)
+    Within 5 cm : 77.8 %   (214 / 275)
+    Within 8 cm : 97.1 %   (267 / 275)
+
+The 5 cm threshold is reached in roughly four out of five trials,
+which is consistent with a system whose dominant error source is
+the pointing estimate rather than the navigation controller: the
+upstream pointing-localisation evaluation (Section 5.1) reports
+single-shot pointing errors of the same order, and the navigation
+stage only has to converge to that already-imperfect target.
+
+--------------------------------------------------------------------------------
+2. Success rate
+--------------------------------------------------------------------------------
+Adopting nav_accuracy_cm <= 5 cm as the operational success criterion,
+the success rate is 77.8 % (failure rate 22.2 %). Within the broader
+8 cm tolerance the success rate rises to 97.1 %, and only 2.9 % of
+trials remain beyond that envelope. Per-session means range from
+1.77 cm to 3.99 cm, indicating that no single recording dominates the
+aggregate and that the system is reproducible across users and days.
+Per-square means are likewise tightly grouped: every grid cell that
+saw at least four arrivals had a mean error between 1.86 cm and
+4.94 cm, with no obvious centre-vs-corner asymmetry that would point
+to a systematic mechanical bias.
+
+--------------------------------------------------------------------------------
+3. Latency
+--------------------------------------------------------------------------------
+Latency, measured as the time from t_start to the detection at which
+the minimum distance was attained, averaged 6.93 s (SD = 4.97 s;
+median = 5.57 s). The minimum was 0.13 s — trials in which the robot
+was already very close to the new target when the gesture was
+committed — and the maximum was 32.6 s, reflecting a handful of
+long-traversal cases where the Sphero had to cross most of the
+workspace or briefly mis-tracked before converging. The fact that the
+median (5.57 s) is well below the mean (6.93 s) again confirms a
+right-skewed distribution: the majority of approaches complete in
+under six seconds, but a non-trivial tail of long approaches inflates
+the mean. For an interactive table-top teleoperation system this
+latency profile is acceptable: it is dominated by physical traversal
+time rather than by perception or control overhead.
+
+--------------------------------------------------------------------------------
+4. Trajectory observations
+--------------------------------------------------------------------------------
+The per-session trajectory plot (robot_trajectory_plot.png) overlays
+the ordered sequence of pointed coordinates for every session. Two
+qualitative patterns are visible. First, the dispersion of reached
+points around each target square centre is small (typically under
+~3 cm), which is the spatial signature of the histogram results.
+Second, paths sweep through neighbouring squares rather than
+teleporting across the workspace, confirming that the Sphero
+genuinely tracks the pointed coordinate and is not simply landing
+on a discrete grid.
+
+The error-over-time plot (trajectory_error_over_time.png) plots
+per-trial nav_accuracy_cm against time since the first trial in each
+session. There is no monotonic drift across a session — the curves
+oscillate around the session mean — which suggests that calibration
+remained stable for the duration of recording and that there is no
+appreciable thermal or mechanical drift in the camera, the projector,
+or the Sphero's IMU.
+
+The target-vs-reached scatter (target_vs_robot_scatter.png) plots the
+target coordinate against the coordinate actually reached, separately
+for the x- and y-axes, with the diagonal indicating the ideal
+target = robot relation. The points lie close to the diagonal across
+the full workspace, with successes (green) tightly clustered and
+the failure subset (red) scattered symmetrically on both sides of
+the diagonal. The symmetric scatter is important: it shows that the
+residual error does not exhibit a consistent bias (the robot is
+not systematically overshooting or undershooting), and is therefore
+better described as zero-mean noise than as a controller offset.
+
+--------------------------------------------------------------------------------
+5. Navigation failures
+--------------------------------------------------------------------------------
+Sixty-one trials (22.2 %) exceeded the 5 cm criterion, and only
+eight trials (2.9 %) exceeded 8 cm. Inspection of these cases against
+the per-square breakdown and the latency distribution suggests three
+contributing factors, none of which dominates on its own.
+
+(a) Overshoot at high commanded velocities. The Sphero's response
+    behaviour is essentially a PD controller acting on the projected
+    target. When the pointed coordinate lies near the far edge of the
+    workspace, the robot accelerates strongly and a fraction of trials
+    overshoot the target by 1–3 cm before settling. Because the
+    metric records the minimum distance attained while still in the
+    target square, very brief overshoots that exit the square are not
+    fully captured; they instead surface as elevated nav_accuracy_cm
+    for short in-square runs.
+
+(b) Late stabilisation. Some trials show a long latency (>15 s)
+    together with a modest residual error. These correspond to cases
+    in which the next pointing gesture arrived before the previous
+    approach had fully settled, so the controller was already chasing
+    a moving target when t_start was committed. This is a property
+    of the experimental protocol (free-flowing pointing) rather than
+    of the navigation stage itself.
+
+(c) Pointing-coordinate noise. Because the navigation reference is
+    the averaged pointed coordinate, the navigation error inherits
+    the variance of the pointing pipeline. Failure trials are
+    distributed across the workspace rather than being concentrated
+    in a particular grid cell, which is consistent with pointing
+    noise being the dominant residual source.
+
+--------------------------------------------------------------------------------
+6. Summary
+--------------------------------------------------------------------------------
+The gesture-driven teleoperation pipeline delivers a navigation
+accuracy of 3.10 +/- 2.32 cm with a 77.8 % within-5-cm success rate
+and a median latency of 5.6 s over 275 trials and 16 sessions.
+Trajectory plots confirm stable tracking with no within-session
+drift, and target-vs-reached scatter shows symmetric, zero-mean
+residuals across the workspace. The remaining failure cases are
+attributable to a combination of overshoot at high commanded
+velocities, late stabilisation under rapid successive gestures, and
+inherited pointing-coordinate noise; none of these point to a
+systematic deficiency of the navigation controller. The system is
+therefore well-suited to coarse, room-scale tele-pointing tasks,
+and any future tightening of the accuracy envelope is most likely
+to come from improvements upstream of navigation rather than from
+the motion controller itself.
+
+================================================================================
+Figures produced (this folder)
+================================================================================
+  navigation_error_histogram.png
+  navigation_success_rate_bar.png
+  navigation_latency_histogram.png
+  robot_trajectory_plot.png
+  trajectory_error_over_time.png
+  target_vs_robot_scatter.png

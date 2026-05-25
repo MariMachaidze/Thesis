@@ -1,0 +1,158 @@
+================================================================================
+Section 5.4 — Robot Navigation Latency
+Gesture-Based Teleoperation of a Sphero Mobile Robot
+================================================================================
+
+Dataset
+-------
+The analysis is based on 275 arrived trials extracted from
+the recording sessions stored in bags/thesis_final/. Each trial
+corresponds to one user pointing gesture that was successfully
+committed by the gating logic (t_start) together with the
+subsequent first continuous in-square run of the Sphero robot.
+Latency is defined per trial as
+
+    latency_s = t_min_distance - t_start
+
+where t_min_distance is the detection sample at which the robot
+attained its minimum distance to the user's pointed coordinate.
+Travel distance for each trial is the Euclidean distance, in
+centimetres, between the previous trial's pointed coordinate (the
+robot's approximate parking position) and the current trial's
+pointed coordinate, chained within each source bag. The first
+trial of each bag has no prior parking position and is therefore
+excluded from the distance-based analyses; the latency
+descriptives use all 275 trials while the regression and
+binned breakdown use 259 trials with a defined
+travel distance (mean 8.9 cm, max
+32.3 cm).
+
+--------------------------------------------------------------------------------
+1. Overall navigation responsiveness
+--------------------------------------------------------------------------------
+Across all 275 trials the mean end-to-end navigation
+latency was 6.93 s (SD = 4.97 s;
+median = 5.57 s; min = 0.13 s;
+max = 32.62 s). The 25th and 75th percentiles were
+3.93 s and 8.70 s respectively, and the
+95th percentile sat at 15.38 s. The median falling
+below the mean indicates a mildly right-skewed distribution, with
+the bulk of trials resolving quickly and a smaller tail of slower
+arrivals that pull the mean upwards.
+
+Decomposed into its two natural phases the latency comprises
+a transit phase of 6.60 s on average
+(t_start -> t_entry, the time taken for the robot to first enter
+the target square) and a settling phase of 0.34 s
+on average (t_entry -> t_min_distance, the additional time the
+controller spends fine-tuning the in-square pose). The transit
+phase accounts for almost the entire end-to-end latency, while
+the in-square settling phase is short and consistent across
+trials.
+
+--------------------------------------------------------------------------------
+2. Latency variation
+--------------------------------------------------------------------------------
+Cumulative breakdown of the latency distribution:
+
+    Within 1 s :   1.8 %
+    Within 2 s :   6.9 %
+    Within 3 s :  17.8 %
+    Within 5 s :  40.7 %
+
+The inter-quartile range of
+4.77 s is comparable in magnitude to the median,
+which means that trial-to-trial latency is variable rather than
+tightly concentrated around a single value. As shown in the next
+section, this variation is not explained by travel distance, so
+the dominant source of variation must be sought in per-trial
+factors such as initial heading misalignment of the Sphero,
+intermittent corrective manoeuvres, and the time required for the
+controller to satisfy the in-square dwell condition.
+
+--------------------------------------------------------------------------------
+3. Effect of travel distance on latency
+--------------------------------------------------------------------------------
+A linear regression of latency on the trial's travel distance
+(distance from the previous parking position to the current
+pointed coordinate, chained within each source bag) yields
+
+    latency_s = 0.058 * distance_cm + 6.609
+    Pearson r = +0.05,  R^2 = 0.00
+
+The relationship is essentially flat. The fitted slope of
+58 ms per centimetre is small and the regression
+explains R^2 = 0.00 of the variance in latency, meaning that
+how far the robot has to travel within the tabletop workspace is
+not a meaningful predictor of how long the trial takes. Binned
+per distance the picture is the same:
+
+    bin (cm)      n     mean latency (s)
+    0-10         180          7.11
+    10-20         69          6.91
+    20-30          9          8.85
+    >30            1          8.68
+
+The first two bins, which contain the overwhelming majority of
+trials, are within a few hundred milliseconds of one another,
+and the few trials in the longer-distance bins do not shift the
+mean upwards in a way that would survive any reasonable
+statistical test. The most plausible explanation is that on this
+workspace scale (a few tens of centimetres) the time spent on
+initial heading alignment, on corrective manoeuvres triggered by
+the controller, and on satisfying the in-square dwell condition
+dominates the actual transit time. The Sphero's heading is not
+observed at t_start, so even a short-distance gesture can
+require the robot to first rotate-in-place before any useful
+translation begins.
+
+--------------------------------------------------------------------------------
+4. Smoothness and discussion
+--------------------------------------------------------------------------------
+Robot control responsiveness. The median end-to-end latency of
+5.57 s reflects the rhythm of a deliberate
+pointing-and-go interaction rather than a continuous teleoperation
+loop: the user commits a gesture, the Sphero then has to physically
+traverse the table, and only on arrival is the next gesture issued.
+At this granularity the cause-effect link between gesture and
+motion is preserved, but the responsiveness is bounded by the
+robot's translation speed and not by the perceptual stack.
+
+Effect of target distance. Within the tabletop workspace, travel
+distance is essentially uncorrelated with latency. This is a
+useful finding for interaction design: the user cannot anticipate
+a shorter response by pointing closer to the robot, but the
+worst-case latency does not blow up either. Even the slowest 5 %
+of trials complete in under 15.4 s, bounding the
+worst-case interaction time.
+
+Smoothness of navigation. The settling phase contributes only
+around 0.34 s on average, which indicates
+that once the robot enters the target square it does not
+oscillate or hunt around the goal. The bulk of the latency
+budget is therefore spent on directed transit rather than on
+end-of-trajectory correction, giving the motion the qualitative
+character of a single committed manoeuvre rather than a
+stop-and-correct sequence.
+
+Suitability for interactive teleoperation. The pipeline is
+appropriate for discrete pointing-and-go interaction on a
+tabletop, where the user issues a gesture and waits a few
+seconds for the robot to arrive before issuing the next one.
+It is not suitable as-is for continuous-control teleoperation,
+where sub-second responsiveness would be required. The lack of
+a meaningful distance-latency coupling implies that the largest
+gains in responsiveness would come from shortening the per-trial
+overheads (initial heading alignment, controller corrections,
+and in-square dwell) rather than from increasing translational
+speed alone. The gesture-recognition and planning stages
+upstream are not the bottleneck.
+
+================================================================================
+Figures
+================================================================================
+  navigation_latency_histogram.png  - distribution of latencies
+  latency_vs_distance_scatter.png   - latency vs travel distance
+  latency_boxplot.png               - latency by distance bin
+  cumulative_navigation_time.png    - cumulative latency CDF
+================================================================================

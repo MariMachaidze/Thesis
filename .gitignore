@@ -1,53 +1,99 @@
-# Catkin build artifacts
-thesis_ws/build/
-thesis_ws/devel/
+# ROS/catkin build artifacts
+build/
+devel/
+install/
+*/build/
+*/devel/
+*/install/
+.catkin_tools/
 
-# Python virtual environment
+# Python environments and caches
 thesis_env/
-
-# Python bytecode
+sphero_env/
+venv/
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+.pytest_cache/
+.mypy_cache/
 
-# IDE
+# Raw experiment data and large captures
+/catkin_ws/
+bags/
+depth_tests/
+*.bag
+*.bag.gz
+
+# Generated ad hoc analysis outputs at the repository root
+/accuracy_*.csv
+/accuracy_*_raw.csv
+/accuracy_results*.png
+/accuracy_results*.txt
+/statistical_analysis.txt
+/session_results*.csv
+/session_results*.png
+/trajectory_metrics_*.csv
+/aggregate_thesis.py
+/analyze_accuracy.py
+/analyze_results.py
+/extract_trials_from_exp.py
+/make_thesis_figures.py
+
+# Legacy local packaging notes replaced by docs/
+/CHECKLIST_AND_NEXT_STEPS.md
+/INDEX_AND_GUIDE.md
+/PACKAGE_STRUCTURE.md
+/QUICK_START.md
+/REFACTORING_SUMMARY.md
+thesis_ws/FULL_SYSTEM_EXPLANATION.md
+thesis_ws/METHODOLOGY_CHAPTER.md
+thesis_ws/NODE_CONNECTIONS_DIAGRAM.md
+thesis_ws/SYSTEM_AUDIT.md
+
+# Local prototype and one-off hardware scripts
+/measure_tilt.py
+/measure_tilt_imu.py
+/version_*.py
+/sphero.py
+/sphero_connect.py
+/test_*.py
+/depth_capture_ae.py
+/depth_realtime_diff.py
+/dump_sensor_options.py
+/ball_tracker.py
+/navigate_saved.py
+/sphero_calib_test.py
+/sphero_move_test.py
+/sphero_navigate.py
+
+# Local generated analysis notebooks/exports inside the ROS workspace
+thesis_ws/*_results.csv
+thesis_ws/*_results_map.png
+thesis_ws/trajectory_metrics_*.csv
+thesis_ws/oef_*.csv
+thesis_ws/oef_*.png
+thesis_ws/oef_tuner.py
+thesis_ws/debug_ray.py
+thesis_ws/aggregate_no_gate.py
+thesis_ws/batch_dual.py
+thesis_ws/dual_analyze.py
+thesis_ws/nav_accuracy.py
+thesis_ws/nav_accuracy_min.py
+thesis_ws/nav_error.py
+thesis_ws/nav_error_v2.py
+
+# IDE, assistant, and OS metadata
 .vscode/
 .idea/
-
-# OS
+.claude/
+.codex/
+.agents/
 .DS_Store
 Thumbs.db
 
 # Archives
 *.zip
-
-# md files
-CHECKLIST_AND_NEXT_STEPS.md
-INDEX_AND_GUIDE.md
-PACKAGE_STRUCTURE.md
-QUICK_START.md
-REFACTORING_SUMMARY.md
-
-measure_tilt_imu.py
-measure_tilt.py
-
-version_1.py
-version_2.py
-version_3.py
-version_4.py
-version_5.py
-version_6.py
-sphero_connect.py
-sphero.py
-test_ae_lock.py
-test_depth_capture.py
-test_sphero_15cm.py
-test_sphero_detect.py
-test_sphero_IR.py
-#ball_tracker.py
-depth_capture_ae.py
-depth_realtime_diff.py
-dump_sensor_options.py
-depth_tests
-sphero_env
-catkin_ws
+*.tar
+*.tar.gz
+*.tgz

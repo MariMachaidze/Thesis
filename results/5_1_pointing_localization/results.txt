@@ -1,0 +1,158 @@
+5.1 Pointing Localization Accuracy — Results
+=============================================
+
+This section reports the accuracy and temporal performance of the
+pointing localization pipeline. The evaluation was carried out on a
+3 x 3 target grid printed on the workspace sheet (850 mm wide by 600 mm
+deep). The operator pointed at each of the nine targets from three
+different hand heights above the surface — 10 cm, 30 cm, and 50 cm —
+with five independent trials per (target, height) combination, yielding
+135 trial-level estimates and approximately 18 000 individual per-frame
+samples. The localization error for each trial is defined as the
+Euclidean distance, in millimetres, between the temporally smoothed
+estimate produced by the pipeline and the true target position on the
+workspace plane.
+
+
+Data Curation
+-------------
+
+Two systematic problems were identified in the raw dataset and corrected
+before any statistics were computed.
+
+Two trials at the top-left target (T1) at a hand height of 30 cm
+(trial 4 and trial 5) were excluded as tracking failures. In both cases
+the temporal smoothing filter locked onto a stray detection located
+near the opposite corner of the workspace, producing errors above
+500 mm together with very low per-trial sample counts; these
+measurements are not representative of normal system behaviour.
+
+Two further trials were reassigned to the neighbouring target. At
+30 cm hand height, trial 1 for T6 was relabelled as T5, and trial 1
+for T9 was relabelled as T8. The measured positions for these two
+trials lay very close to the ground-truth positions of T5 and T8
+respectively, indicating that the operator pointed at the wrong
+target during the run. The corresponding errors were recomputed
+against the corrected ground-truth values and the trials retained.
+
+After these corrections the data set contains 133 trial-level
+localization estimates.
+
+
+Overall Localization Accuracy
+-----------------------------
+
+Across the curated data set (N = 133), the system produced a mean
+localization error of 63.9 mm with a standard deviation of 30.1 mm and
+a median of 60.0 mm. Errors ranged from a minimum of 3.0 mm to a
+maximum of 177.3 mm. The proximity between mean and median, together
+with the modest standard deviation, indicates that the error
+distribution is approximately unimodal and only mildly skewed once the
+gross tracking failures have been removed. Relative to the 850 x 600 mm
+operational area, the mean error corresponds to roughly 7-8% of the
+workspace's smaller dimension, which is adequate for the coarse
+selection of regions and waypoints required by the downstream Sphero
+navigation task.
+
+
+Effect of Hand Height
+---------------------
+
+Localization accuracy was analysed separately for each of the three
+hand heights. The mean error was 81.6 mm (std 19.3 mm, median 81.2 mm)
+at 10 cm, 51.9 mm (std 35.3 mm, median 42.2 mm) at 30 cm, and 57.6 mm
+(std 25.4 mm, median 56.1 mm) at 50 cm. Accuracy did not therefore
+degrade monotonically with hand height; on the contrary, the lowest
+hand position produced the largest mean error and the elevated
+positions both improved on it noticeably. This behaviour can be
+explained geometrically: when the hand is very close to the workspace,
+the pointing vector — defined between two finger landmarks separated
+by only a few centimetres — is short and any depth jitter on either
+landmark causes a disproportionate angular change in the projected
+ray. At greater hand heights the same physical jitter spans a longer
+baseline and the resulting projection on the workspace plane is more
+stable. The 30 cm condition emerged as the most favourable in terms
+of central tendency, while 50 cm offered the tightest dispersion
+around its mean.
+
+
+Spatial Accuracy Across the Workspace
+-------------------------------------
+
+The mean error was then aggregated per target and arranged according
+to the physical 3 x 3 layout. The largest mean errors were found
+along the middle-left region of the workspace: target T4 (mid-left)
+showed the highest mean error at 94.6 mm, followed by T2 (top-centre)
+at 72.4 mm and T5 (centre) at 69.8 mm. The remaining targets all fell
+in a relatively narrow band between approximately 48 and 70 mm, with
+T8 (bottom-centre) the most accurate at 48.0 mm. There is therefore a
+systematic, but not large, tendency for the left-hand column of the
+workspace to be less accurately localized than the right-hand column.
+This is consistent with two well-known characteristics of
+single-camera vision-based pointing systems: peripheral targets are
+imaged at oblique angles, which reduces the effective depth
+resolution along the pointing ray, and any residual calibration
+offset between the depth sensor and the workspace plane is amplified
+at locations farther from the calibration centre. The axis-bias
+analysis confirmed a consistent leftward offset of the estimates at
+all three hand heights, which contributes to the slightly poorer
+accuracy of the left-hand targets.
+
+
+Sources of Larger Errors
+------------------------
+
+The residual heavy tail of the error distribution can be attributed
+to three principal factors. First, natural unsteadiness of the human
+hand during sustained pointing produces high-frequency jitter that
+the One-Euro temporal filter mitigates but does not entirely remove.
+Second, occasional partial occlusions or merging of the fingertip
+with the wrist or background structure cause isolated misdetections
+that are propagated through the filter when the trial is short.
+Third, the oblique viewing geometry at the periphery of the
+workspace reduces the resolution of the depth sensor along the
+pointing ray, increasing the variance of the projected estimate at
+peripheral targets such as T4. Notably, even the corrected maximum
+error of 177.3 mm is well below the workspace's half-width, so the
+worst-case estimate still selects the correct quadrant of the
+workspace.
+
+
+Real-Time Usability
+-------------------
+
+In addition to spatial accuracy, the temporal performance of the
+pipeline was characterised at the per-sample level. Across all
+retained trials (N ≈ 18 000 samples) the mean processing latency per
+frame was 55.4 ms with a standard deviation of 16.7 ms; the bulk of
+the distribution lay between 45 and 65 ms, corresponding to an
+effective update rate of approximately 15-20 Hz. The pipeline ran
+continuously throughout the experiment with no detected frame drops
+or processing stalls, and the latency distribution remained stable
+across all three hand heights. A response time in this range is well
+within the limits commonly accepted for real-time human-robot
+interaction and is sufficient to drive the downstream Sphero
+navigation system without introducing perceivable lag for the user.
+
+
+Summary
+-------
+
+After excluding two filter-lock failures and re-labelling two trials
+in which the operator pointed at the wrong target, the pointing
+localization system achieved a mean error of 63.9 mm and a median of
+60.0 mm across 133 trials, with errors bounded by 3-177 mm. The 30 cm
+hand height produced the best central tendency, the 50 cm height the
+tightest variance, and the 10 cm height the worst overall accuracy —
+indicating that performance does not decrease with hand height but in
+fact benefits from a longer pointing baseline. Spatial accuracy was
+broadly uniform across the workspace, with a modest but systematic
+penalty at left-hand and edge targets attributable to peripheral
+viewing geometry and a small residual leftward axis bias. The
+measured per-frame latency of approximately 55 ms confirms that the
+localization stage operates comfortably in real time, and the
+combination of stable latency, modest mean error, and absence of
+filter divergence (once the two tracking failures are removed)
+indicates that the system delivers repeatable and sufficiently
+accurate pointing performance for the interaction scenario targeted
+in this thesis.

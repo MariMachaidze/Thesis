@@ -1,0 +1,203 @@
+================================================================================
+Section 5.5 -- Navigation Success Rate
+Gesture-Based Teleoperation of a Sphero Mobile Robot
+================================================================================
+
+Dataset and success criterion
+-----------------------------
+The analysis uses the deduplicated aggregate of all per-session
+results.csv files produced by thesis_ws/analyze_session.py
+(bags/thesis_final/aggregate_results_deduped.csv), which contains
+174 unique trials drawn from 16 recording sessions. A "trial" is one
+continuous dwell of the user's pointing target on a single 10x10 cm
+grid square that lasted at least the segmentation minimum dwell of
+0.5 s; duplicate trial events with the same target square and start
+time within 0.2 s were collapsed, preferring per-trial recordings
+over overlapping exp_* recordings.
+
+The success criterion is the one defined by the upstream pipeline:
+a trial succeeds if the Sphero's centre eventually enters the
+requested 10x10 cm target square after t_start. This is an
+"eventual arrival" metric -- the robot may arrive after the user has
+already moved their finger to the next square, but the binary
+outcome only asks whether the requested cell was ever entered.
+The criterion is therefore a geometric containment test against a
+10 cm box, not a Euclidean radius around the square centre, and it
+is independent of the per-trial navigation accuracy analysed in
+Section 5.2.
+
+--------------------------------------------------------------------------------
+1. Overall success rate
+--------------------------------------------------------------------------------
+Across all 174 trials, the Sphero entered the requested target
+square in 164 trials and failed to do so in 10 trials, giving an
+overall success rate of 94.3 % (failure rate 5.7 %). Across the
+16 sessions, individual success rates ranged from 78.6 %
+(11/14 in trial_03_2026-05-14-17-06-32) to 100 % (8 sessions),
+indicating that no single session drives the aggregate and that the
+behaviour is reproducible across users and recording days.
+
+The mean distance from the recorded robot position to the target-
+square centre is 5.51 cm (SD 0.71) for arrived trials and 34.5 cm
+(SD 17.9) for missed trials. The arrived population is bounded
+above by the square half-diagonal (sqrt(2) * 5 cm = 7.07 cm), as it
+must be -- by definition the robot is inside the 10 cm square at the
+moment of arrival -- and the missed population sits an order of
+magnitude further away. There is no overlap between the two
+distributions, so the binary success label and a continuous distance
+metric agree on every trial in the dataset.
+
+--------------------------------------------------------------------------------
+2. Success rate by target region
+--------------------------------------------------------------------------------
+The workspace was partitioned into six rectangular regions by
+splitting the target's x coordinate into Left / Centre / Right
+thirds and its y coordinate into Near / Far halves. The per-region
+success rates are:
+
+    Near-Left    : 100.0 %  (14 / 14)
+    Near-Centre  :  91.4 %  (32 / 35)
+    Near-Right   :  84.6 %  (11 / 13)
+    Far-Left     :  96.4 %  (27 / 28)
+    Far-Centre   :  96.2 %  (51 / 53)
+    Far-Right    :  93.5 %  (29 / 31)
+
+The two halves of the workspace are essentially indistinguishable
+(Near 91.6 %, Far 95.4 %), and all six regions sit in the
+85--100 % band. The single lowest cell (Near-Right) is the smallest
+sample (n = 13); a single additional miss in this cell would already
+move it by ~7 percentage points, so the small per-region variation
+is more easily explained by sampling noise than by a spatial
+structural effect. There are no "dead zones" of the workspace at
+which the robot is unable to arrive.
+
+--------------------------------------------------------------------------------
+3. Relationship between navigation error and success
+--------------------------------------------------------------------------------
+The outcome-vs-distance scatter (success_vs_error_scatter.png)
+plots, for every trial, the Euclidean distance between the recorded
+robot position and the centre of the target square, separated by
+outcome. Three features are visible.
+
+(a) All 164 arrived trials lie at or below 6.86 cm from the centre,
+    which is the empirical upper bound of the square half-diagonal
+    (7.07 cm). The arrived cluster is tightly concentrated around
+    ~5.5 cm because the recorded position is captured at the
+    moment the robot first crosses into the square -- typically
+    near a square boundary rather than at its centre.
+
+(b) All 10 missed trials lie far beyond the half-diagonal cut-off,
+    with distances between roughly 12 cm and 67 cm. There is no
+    "near miss" population just outside the square boundary.
+
+(c) The conditional means (5.51 cm vs. 34.5 cm) differ by about a
+    factor of six, and the two distributions are perfectly linearly
+    separable in this projection. Success is therefore not a noisy
+    thresholding of a continuous accuracy distribution; it
+    partitions the trials into a populous low-error cluster and a
+    small high-error tail.
+
+The qualitative reading is that when the controller arrives at all,
+it arrives accurately; when it fails, it fails decisively, with the
+robot ending the trial window several target-square widths away
+from the requested cell.
+
+--------------------------------------------------------------------------------
+4. Workspace heatmap
+--------------------------------------------------------------------------------
+The workspace heatmap (workspace_success_heatmap.png) bins the
+target coordinates onto the same 10 cm grid used for the
+experiment. The vast majority of populated cells are at or above
+the 90 % success rate, and the few cells that drop lower contain
+only a handful of trials each. The 0 % entry at (70, 10) is a
+single trial that failed to arrive, not a systematic failure of the
+far-right-near corner. No row, column, or diagonal of the heatmap
+shows a coherent reduction in success rate, confirming the
+region-level conclusion that the system is uniformly reliable
+across the navigable workspace.
+
+--------------------------------------------------------------------------------
+5. Discussion
+--------------------------------------------------------------------------------
+
+Practical reliability. A 94.3 % within-square success rate over
+174 trials, with the worst session still arriving on roughly four
+out of five trials, is consistent with a system that is practically
+reliable for coarse tabletop teleoperation. The user can issue a
+sequence of pointing gestures and expect the robot to reach the
+intended grid cell in essentially every trial. Failures are the
+exception rather than a recurring frustration in interactive use.
+
+Regions with lower success. The lowest per-region rate (Near-Right,
+84.6 %) coincides with the smallest regional sample (n = 13), and
+a single trial of difference shifts it by ~7 percentage points.
+The Near vs. Far axis shows a 3.8-point difference (91.6 % vs.
+95.4 %) that is consistent with the user occasionally pointing into
+the body-near edge of the workspace where the camera sees the
+projected finger at a shallow angle and the resulting target is
+more variable. The Left/Right asymmetry is small (Left 97.6 %,
+Right 91.4 %) and not concentrated in any one cell of the heatmap;
+it is best read as residual sample variation. No region exhibits a
+systematic geometric or controller-side failure mode.
+
+Effect of localisation accuracy. The pointing localisation evaluated
+in Section 5.1 produces single-shot errors on the order of a few
+centimetres; given that the navigation target is the averaged
+pointed coordinate, an upstream error of similar order is the
+binding constraint on whether the robot can plausibly enter the
+correct 10 cm square. The fact that 94 % of trials nevertheless
+succeed at this binary criterion means that the pointing pipeline
+typically resolves the correct grid cell even when its absolute
+error is non-zero; failures in this section are therefore
+concentrated at trials where the pointing estimate fell into a
+neighbouring cell, not at trials where the controller failed to
+track an accurately resolved target.
+
+Observed behaviour during failed trials. Across the ten missed
+trials, the distance between the last recorded robot position and
+the requested square centre lies between ~12 cm and ~67 cm,
+with no examples in the 5--10 cm "almost in the square" band. This
+distribution is consistent with three qualitative failure modes
+observed in the per-session map.png plots. (i) Off-by-one cell:
+the controller drove the robot accurately to an adjacent square
+because the averaged pointing target fell across a grid boundary;
+this produces missed trials with end distances around 10--15 cm.
+(ii) Pre-empted approach: the user moved their finger to the next
+square before the robot finished its current approach, so the
+controller abandoned the previous target while still several cells
+away; this produces missed trials with end distances of 20--40 cm.
+(iii) Tracking dropouts: occasional brief detection gaps caused the
+last-known position to lag the robot's actual position by tens of
+centimetres in the rare frames near the bag end. None of these
+failure modes points to a defect of the navigation controller -- in
+each case the controller did what was asked of it, but the
+combination of upstream pointing noise, free-flowing protocol, and
+detection coverage produced an end state outside the requested
+cell.
+
+--------------------------------------------------------------------------------
+6. Summary
+--------------------------------------------------------------------------------
+Using the upstream "did the Sphero enter the requested 10x10 cm
+square?" success criterion, the gesture-driven teleoperation
+pipeline achieves a 94.3 % success rate over 174 deduplicated
+trials and 16 sessions. The success rate is spatially uniform
+across the workspace, with no region falling below 85 % and the
+per-region variation explained by the small samples in the
+extremes. The arrived and missed populations are cleanly separated
+in robot-to-centre distance (means 5.5 cm vs. 34.5 cm with no
+overlap), so the binary success label is robust. The few observed
+failures correspond to upstream pointing errors that resolved to
+the wrong grid cell or to user gestures arriving before the
+previous approach had completed, rather than to any deficiency of
+the navigation controller. The system is therefore well-suited as a
+coarse tele-pointing interface, and further gains in reliability
+are most likely to come from improvements upstream of navigation.
+
+================================================================================
+Figures produced (this folder)
+================================================================================
+  overall_success_rate_bar.png
+  success_rate_by_region.png
+  success_vs_error_scatter.png
+  workspace_success_heatmap.png
